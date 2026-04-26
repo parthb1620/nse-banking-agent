@@ -1,68 +1,73 @@
 """
 Corporate action fetcher and backward price adjuster.
 
-Fetches splits, bonus issues, and dividends from NSE.
-Adjusts all historical OHLCV rows before ex_date using backward adjustment factors.
-
+Source: yfinance (.splits and .dividends) — reliable historical data for all NSE stocks.
+yfinance split ratio = new_shares / old_shares  (e.g. 5.0 for a 1→5 split).
 Adjustment rules:
-  Split 1:N  → multiply historical prices by 1/N, multiply volume by N
-  Bonus 1:N  → multiply historical prices by N/(N+1), multiply volume by (N+1)/N
-  Dividend D → subtract D from all historical closes before ex_date (cash adjustment)
+  Split/Bonus → price factor = 1/ratio, volume factor = ratio
+  Dividend    → subtract amount from all adjusted_close before ex_date
 
 Adjusted close is stored in ohlcv_daily.adjusted_close.
 Raw close is preserved in ohlcv_daily.close.
 """
 
-from datetime import date, datetime
+from datetime import datetime
 
-import requests
+import yfinance as yf
 from loguru import logger
 from sqlalchemy import text
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config.settings import BANKING_STOCKS
 from data.quality.known_time import compute_usable_from
 from data.storage.database import CorporateAction, get_session
 
-_NSE_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Referer": "https://www.nseindia.com/",
-    "Accept":  "application/json",
-}
 
-_NSE_CORP_ACTIONS_URL = (
-    "https://www.nseindia.com/api/corporatecAnnouncement-latest"
-    "?index=equities&symbol={symbol}"
-)
+def fetch_corporate_actions(symbol: str) -> list[dict]:
+    """
+    Fetch splits and dividends for one NSE symbol via yfinance.
+    Returns list of action dicts ready for storage.
+    yfinance split ratio = new_shares/old_shares (matches our CorporateAction.ratio field).
+    """
+    ticker = yf.Ticker(f"{symbol}.NS")
+    actions = []
 
+    try:
+        for ts, ratio in ticker.splits.items():
+            if ratio <= 0:
+                continue
+            actions.append({
+                "ex_date":     ts.date(),
+                "action_type": "split",
+                "ratio":       float(ratio),
+                "amount":      None,
+            })
+    except Exception as exc:
+        logger.warning(f"yfinance splits fetch failed for {symbol}: {exc}")
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-def _fetch_from_nse(symbol: str) -> list[dict]:
-    """Fetch corporate actions JSON from NSE API."""
-    session = requests.Session()
-    session.headers.update(_NSE_HEADERS)
-    # Prime cookies
-    session.get("https://www.nseindia.com", timeout=15)
+    try:
+        for ts, amount in ticker.dividends.items():
+            if amount <= 0:
+                continue
+            actions.append({
+                "ex_date":     ts.date(),
+                "action_type": "dividend",
+                "ratio":       None,
+                "amount":      float(amount),
+            })
+    except Exception as exc:
+        logger.warning(f"yfinance dividends fetch failed for {symbol}: {exc}")
 
-    url = _NSE_CORP_ACTIONS_URL.format(symbol=symbol)
-    resp = session.get(url, timeout=15)
-    resp.raise_for_status()
-    return resp.json() if isinstance(resp.json(), list) else resp.json().get("data", [])
+    return actions
 
 
 def fetch_and_store_actions(symbol: str) -> int:
     """
-    Fetch corporate actions from NSE and store new ones in corporate_actions table.
+    Fetch corporate actions via yfinance and store new ones in corporate_actions table.
     Returns number of new rows inserted.
     """
-    try:
-        raw = _fetch_from_nse(symbol)
-    except Exception as exc:
-        logger.error(f"Corporate actions fetch failed for {symbol}: {exc}")
+    raw = fetch_corporate_actions(symbol)
+    if not raw:
+        logger.warning(f"No corporate actions found for {symbol}")
         return 0
 
     now      = datetime.utcnow()
@@ -70,43 +75,12 @@ def fetch_and_store_actions(symbol: str) -> int:
 
     with get_session() as session:
         for item in raw:
-            purpose = (item.get("purpose") or item.get("subject") or "").lower()
+            ex_date     = item["ex_date"]
+            action_type = item["action_type"]
+            ratio       = item["ratio"]
+            amount      = item["amount"]
 
-            # Classify action type
-            if "split" in purpose:
-                action_type = "split"
-            elif "bonus" in purpose:
-                action_type = "bonus"
-            elif "dividend" in purpose or "div" in purpose:
-                action_type = "dividend"
-            else:
-                continue   # ignore AGM, rights, etc. for now
-
-            ex_date_str = item.get("exDate") or item.get("ex_date") or item.get("exdate")
-            if not ex_date_str:
-                continue
-
-            try:
-                ex_date = datetime.strptime(ex_date_str.strip(), "%d-%b-%Y").date()
-            except ValueError:
-                try:
-                    ex_date = date.fromisoformat(ex_date_str.strip())
-                except ValueError:
-                    logger.warning(f"Cannot parse ex_date '{ex_date_str}' for {symbol}")
-                    continue
-
-            # Parse ratio/amount from purpose string (best-effort)
-            ratio, amount = _parse_ratio(purpose, action_type)
-
-            announced_str = item.get("broadcastDateTime") or item.get("bcstDateTime")
-            announced_at  = None
-            if announced_str:
-                try:
-                    announced_at = datetime.fromisoformat(announced_str.replace("Z", "+00:00"))
-                except ValueError:
-                    pass
-
-            usable_from = compute_usable_from(announced_at or datetime.combine(ex_date, datetime.min.time()))
+            usable_from = compute_usable_from(datetime.combine(ex_date, datetime.min.time()))
 
             exists = session.query(CorporateAction).filter_by(
                 symbol=symbol, ex_date=ex_date, action_type=action_type
@@ -120,8 +94,8 @@ def fetch_and_store_actions(symbol: str) -> int:
                 action_type=action_type,
                 ratio=ratio,
                 amount=amount,
-                announced_at=announced_at,
-                published_at=announced_at,
+                announced_at=None,
+                published_at=None,
                 collected_at=now,
                 usable_from=usable_from,
             ))
@@ -136,7 +110,8 @@ def fetch_and_store_actions(symbol: str) -> int:
 
 def _parse_ratio(purpose: str, action_type: str) -> tuple[float | None, float | None]:
     """
-    Best-effort ratio/amount extraction from free-text purpose string.
+    Parse ratio/amount from a free-text NSE corporate action purpose string.
+    Used when processing raw NSE announcement text (e.g. from filings scraped later).
     Examples: "Bonus 1:1", "Stock Split From Rs.10/- To Rs.1/-", "Dividend Rs.19"
     Returns (ratio, amount).
     """

@@ -13,7 +13,16 @@ from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
 import feedparser
+import requests
 from loguru import logger
+
+_RSS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
 
 from config.nse_calendar import is_trading_day, next_trading_day
 from config.settings import BANKING_STOCKS
@@ -29,9 +38,7 @@ _RSS_FEEDS = {
         "https://news.google.com/rss/search"
         "?q={symbol}+NSE+bank+India&hl=en-IN&gl=IN&ceid=IN:en"
     ),
-    "moneycontrol": (
-        "https://www.moneycontrol.com/rss/buzzstocks.xml"
-    ),
+    "moneycontrol": "https://www.moneycontrol.com/rss/MCtopnews.xml",
     "economic_times": (
         "https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms"
     ),
@@ -58,7 +65,11 @@ def _compute_usable_from_for_news(published_at: datetime) -> datetime:
 def _fetch_feed(url: str, source: str) -> list[dict]:
     """Parse a single RSS feed URL. Returns list of article dicts."""
     try:
-        feed = feedparser.parse(url)
+        # feedparser's default User-Agent is blocked by Google News and some feeds;
+        # fetch with requests first and hand the bytes to feedparser
+        resp = requests.get(url, headers=_RSS_HEADERS, timeout=15)
+        resp.raise_for_status()
+        feed = feedparser.parse(resp.content)
         articles = []
         for entry in feed.entries:
             pub_str = entry.get("published") or entry.get("updated")

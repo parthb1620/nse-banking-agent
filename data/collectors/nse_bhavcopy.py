@@ -87,15 +87,23 @@ def download_bhavcopy(trading_date: date) -> pd.DataFrame | None:
             logger.warning(f"Bhavcopy for {trading_date}: none of the banking stocks found")
             return None
 
-        df = df.rename(columns={
-            sym_col:     "symbol",
-            "OPEN":      "open",
-            "HIGH":      "high",
-            "LOW":       "low",
-            "CLOSE":     "close",
-            "TOTTRDQTY": "volume",
-            "PREVCLOSE": "prev_close",
-        })
+        # Handle both Bhavcopy column formats:
+        #   sec_bhavdata_full: OPEN_PRICE, HIGH_PRICE, LOW_PRICE, CLOSE_PRICE, TTL_TRD_QNTY
+        #   older CM Bhavcopy: OPEN, HIGH, LOW, CLOSE, TOTTRDQTY
+        cols_upper = {c.strip().upper(): c.strip() for c in df.columns}
+        col_map = {sym_col: "symbol"}
+        for target, candidates in {
+            "open":   ["OPEN_PRICE",  "OPEN"],
+            "high":   ["HIGH_PRICE",  "HIGH"],
+            "low":    ["LOW_PRICE",   "LOW"],
+            "close":  ["CLOSE_PRICE", "CLOSE"],
+            "volume": ["TTL_TRD_QNTY", "TOTTRDQTY"],
+        }.items():
+            for c in candidates:
+                if c in cols_upper:
+                    col_map[cols_upper[c]] = target
+                    break
+        df = df.rename(columns=col_map)
         df["symbol"] = df["symbol"].str.strip()
         df["date"]   = trading_date
         return df[["symbol", "date", "open", "high", "low", "close", "volume"]]
