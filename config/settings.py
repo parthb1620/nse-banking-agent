@@ -1,0 +1,123 @@
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ── Paths ──────────────────────────────────────────────────────────────────────
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data_store"
+LOG_DIR  = BASE_DIR / "logs"
+
+DATA_DIR.mkdir(exist_ok=True)
+LOG_DIR.mkdir(exist_ok=True)
+
+# ── Database ───────────────────────────────────────────────────────────────────
+DB_URL = os.getenv("DB_URL", f"sqlite:///{DATA_DIR}/nse_agent.db")
+
+# ── Groww API ──────────────────────────────────────────────────────────────────
+GROWW_API_KEY    = os.getenv("GROWW_API_KEY", "")
+GROWW_API_SECRET = os.getenv("GROWW_API_SECRET", "")
+GROWW_BASE_URL   = "https://api.groww.in"
+
+# ── Ollama / LLM ───────────────────────────────────────────────────────────────
+OLLAMA_BASE_URL  = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL     = os.getenv("OLLAMA_MODEL", "gemma3")
+LLM_TEMPERATURE  = 0.1
+LLM_TOP_P        = 0.9
+LLM_NUM_PREDICT  = 500
+
+# ── Telegram ───────────────────────────────────────────────────────────────────
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# ── Banking Stocks ─────────────────────────────────────────────────────────────
+# NSE symbols (no suffix) — used for Bhavcopy and all NSE APIs
+BANKING_STOCKS = [
+    "HDFCBANK",
+    "ICICIBANK",
+    "SBIN",
+    "AXISBANK",
+    "KOTAKBANK",
+    "BANKBARODA",
+    "FEDERALBNK",
+]
+
+# yfinance symbols — used ONLY for fallback / backfill (Phase 1 fallback path)
+BANKING_STOCKS_YF = [f"{s}.NS" for s in BANKING_STOCKS]
+
+STOCK_NAMES = {
+    "HDFCBANK":   "HDFC Bank",
+    "ICICIBANK":  "ICICI Bank",
+    "SBIN":       "State Bank of India",
+    "AXISBANK":   "Axis Bank",
+    "KOTAKBANK":  "Kotak Mahindra Bank",
+    "BANKBARODA": "Bank of Baroda",
+    "FEDERALBNK": "Federal Bank",
+}
+
+# ── Technical Indicator Parameters ────────────────────────────────────────────
+EMA_PERIODS  = [9, 21, 50, 200]
+RSI_PERIOD   = 14
+MACD_FAST    = 12
+MACD_SLOW    = 26
+MACD_SIGNAL  = 9
+BB_PERIOD    = 20
+BB_STD       = 2
+ATR_PERIOD   = 14
+ADX_PERIOD   = 14
+
+# ── Signal Thresholds ──────────────────────────────────────────────────────────
+RSI_ENTRY_LOW  = 35   # only enter long when RSI is above this (not deeply oversold)
+RSI_ENTRY_HIGH = 60   # only enter long when RSI is below this (not overbought)
+RSI_EXIT       = 75   # exit long when RSI crosses above this
+ADX_TREND_MIN  = 25   # below this = no clear trend; skip momentum signals
+
+# ── Risk Management ────────────────────────────────────────────────────────────
+PAPER_TRADING_CAPITAL  = float(os.getenv("PAPER_TRADING_CAPITAL", "500000"))
+RISK_PER_TRADE_PCT     = 0.02   # risk 2% of portfolio per trade
+MAX_OPEN_POSITIONS     = 3      # max simultaneous positions (one sector concentration)
+MIN_RISK_REWARD        = 2.0    # minimum 1:2 R:R before entering a trade
+ATR_STOP_MULTIPLIER    = 2.0    # stop_loss = entry - (ATR_STOP_MULTIPLIER × ATR_14)
+DAILY_LOSS_LIMIT_PCT   = 0.03   # pause new trades if portfolio drops 3% in one day
+
+# ── Backtesting ────────────────────────────────────────────────────────────────
+# 0.40% total round-trip cost: brokerage 0.06% + STT 0.20% + exchange 0.0067% + GST ~0.012% + slippage 0.10%
+BACKTEST_TRANSACTION_COST_PCT = 0.0040
+INDIA_RISK_FREE_RATE          = 0.065   # 6.5% annualised for Sharpe ratio
+
+BACKTEST_TRAIN_START = "2019-01-01"
+BACKTEST_TRAIN_END   = "2022-12-31"
+BACKTEST_VAL_START   = "2023-01-01"
+BACKTEST_VAL_END     = "2023-12-31"
+BACKTEST_TEST_START  = "2024-01-01"
+BACKTEST_TEST_END    = "2024-12-31"
+
+# ── Scoring Weights ────────────────────────────────────────────────────────────
+SCORE_WEIGHT_TECHNICAL   = 0.50
+SCORE_WEIGHT_FUNDAMENTAL = 0.30
+SCORE_WEIGHT_SENTIMENT   = 0.20
+
+# If LLM directional accuracy falls below this threshold, sentiment weight drops to LOW value
+LLM_ACCURACY_THRESHOLD  = 0.55
+LLM_ACCURACY_LOW_WEIGHT = 0.10
+
+# ── Data Collection ────────────────────────────────────────────────────────────
+# NSE Bhavcopy URL — date must be formatted as DDMMYYYY before substituting
+NSE_BHAVCOPY_URL    = "https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{date}.csv"
+SCREENER_BASE_URL   = "https://www.screener.in"
+SCREENER_DELAY_SEC  = 2     # 1 request per 2 seconds — Screener.in rate limit
+DATA_BACKFILL_YEARS = 5
+
+# ── Scheduler ──────────────────────────────────────────────────────────────────
+SCHEDULER_TIMEZONE = "Asia/Kolkata"
+MORNING_SCAN_TIME  = "08:30"   # IST — overnight news + top picks before market open
+EOD_REPORT_TIME    = "16:15"   # IST — updated scores + new signals after market close
+
+# ── Live Trading Gate ──────────────────────────────────────────────────────────
+# This must be explicitly set to "true" in .env to enable live order placement.
+# Keep false until 3+ months of paper trading shows positive results.
+LIVE_TRADING_ENABLED = os.getenv("LIVE_TRADING_ENABLED", "false").lower() == "true"
