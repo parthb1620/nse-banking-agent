@@ -58,14 +58,21 @@ def eod_collection_job() -> None:
     except Exception as exc:
         logger.error(f"Bhavcopy step failed: {exc}")
 
-    # Step 2: Secondary — Groww API (fill gaps)
+    # Step 2: Secondary — Groww API (fill gaps for last 5 days)
+    # Groww publishes EOD data with a delay; fetching a window ensures we catch
+    # any days missed by Bhavcopy without failing when today isn't published yet.
     try:
+        from datetime import timedelta
         from data.collectors.groww_client import fetch_historical, store_historical
         from config.settings import BANKING_STOCKS
+        gap_start = today - timedelta(days=5)
         for symbol in BANKING_STOCKS:
-            rows = fetch_historical(symbol, today, today)
+            rows = fetch_historical(symbol, gap_start, today)
             if rows:
                 store_historical(symbol, rows)
+                logger.info(f"Groww gap-fill: stored {len(rows)} rows for {symbol}")
+            else:
+                logger.debug(f"Groww gap-fill: no new rows for {symbol} (data not yet published)")
     except Exception as exc:
         logger.error(f"Groww gap-fill step failed: {exc}")
 
@@ -111,6 +118,18 @@ def morning_scan_job() -> None:
     run()
 
 
+def paper_trading_entry_job() -> None:
+    """09:20 IST — enter paper trades based on today's BUY signals."""
+    from paper_trading.simulator import run
+    run()
+
+
+def paper_trading_exit_job() -> None:
+    """15:35 IST — close paper trades that hit stop or target today."""
+    from paper_trading.tracker import run
+    run()
+
+
 def eod_report_job() -> None:
     """16:15 IST — updated scores + signals Telegram alert."""
     from scheduler.jobs.eod_report import run
@@ -137,6 +156,26 @@ def start_scheduler() -> None:
         hour=int(mh), minute=int(mm),
         id="morning_scan",
         name="Morning scan + alert",
+        misfire_grace_time=300,
+    )
+
+    # Paper trading entry at 09:20 IST (5 min after market open)
+    scheduler.add_job(
+        paper_trading_entry_job,
+        trigger="cron",
+        hour=9, minute=20,
+        id="paper_entry",
+        name="Paper trade entries",
+        misfire_grace_time=300,
+    )
+
+    # Paper trading exit check at 15:35 IST (5 min before close)
+    scheduler.add_job(
+        paper_trading_exit_job,
+        trigger="cron",
+        hour=15, minute=35,
+        id="paper_exit",
+        name="Paper trade exit check",
         misfire_grace_time=300,
     )
 
@@ -179,5 +218,9 @@ if __name__ == "__main__":
         morning_scan_job()
     elif cmd == "eod":
         eod_report_job()
+    elif cmd == "paper_entry":
+        paper_trading_entry_job()
+    elif cmd == "paper_exit":
+        paper_trading_exit_job()
     else:
         start_scheduler()

@@ -26,9 +26,9 @@ import streamlit as st
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from config.settings import BANKING_STOCKS, STOCK_NAMES
+from config.settings import BANKING_STOCKS, PAPER_TRADING_CAPITAL, STOCK_NAMES
 from data.storage.database import (
-    NewsArticle, OHLCVDaily, TechnicalSignal, get_session, init_db,
+    NewsArticle, OHLCVDaily, PaperTrade, TechnicalSignal, get_session, init_db,
 )
 
 _IST = ZoneInfo("Asia/Kolkata")
@@ -317,7 +317,63 @@ except Exception as e:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Section 5 — Data quality
+# Section 5 — Paper Trading P&L
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.header("💼 Paper Trading")
+
+try:
+    with get_session() as _s:
+        _all_trades  = _s.query(PaperTrade).all()
+        _open        = [t for t in _all_trades if t.status == "open"]
+        _closed      = [t for t in _all_trades if t.status in ("closed_target", "closed_stop", "closed_manual")]
+
+    _total_pnl  = sum(t.pnl for t in _closed if t.pnl is not None)
+    _wins       = [t for t in _closed if t.pnl is not None and t.pnl > 0]
+    _win_rate   = len(_wins) / len(_closed) * 100 if _closed else 0.0
+    _capital    = PAPER_TRADING_CAPITAL + _total_pnl
+
+    _c1, _c2, _c3, _c4 = st.columns(4)
+    _c1.metric("Capital", f"₹{_capital:,.0f}", delta=f"₹{_total_pnl:+,.0f}")
+    _c2.metric("Return", f"{_total_pnl / PAPER_TRADING_CAPITAL * 100:+.2f}%")
+    _c3.metric("Win rate", f"{_win_rate:.0f}%", delta=f"{len(_closed)} trades")
+    _c4.metric("Open positions", len(_open))
+
+    if _open:
+        st.subheader("Open Positions")
+        _open_df = pd.DataFrame([{
+            "Symbol":     t.symbol,
+            "Entry date": str(t.entry_date),
+            "Entry ₹":    t.entry_price,
+            "Stop ₹":     t.stop_loss,
+            "Target ₹":   t.target,
+            "Qty":        t.quantity,
+            "Thesis":     (t.thesis or "")[:80],
+        } for t in _open])
+        st.dataframe(_open_df.set_index("Symbol"), use_container_width=True)
+
+    if _closed:
+        st.subheader("Trade History (last 20)")
+        _hist_df = pd.DataFrame([{
+            "Symbol":     t.symbol,
+            "Entry":      str(t.entry_date),
+            "Exit":       str(t.exit_date),
+            "Entry ₹":    t.entry_price,
+            "Exit ₹":     t.exit_price,
+            "Qty":        t.quantity,
+            "P&L ₹":      t.pnl,
+            "Result":     t.status.replace("closed_", ""),
+        } for t in sorted(_closed, key=lambda x: x.exit_date or date.min, reverse=True)[:20]])
+        st.dataframe(_hist_df.set_index("Symbol"), use_container_width=True)
+    elif not _open:
+        st.info("No trades yet. Trades are entered at 09:20 IST when BUY signals exist.")
+
+except Exception as e:
+    st.error(f"Could not load paper trades: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Section 6 — Data quality
 # ══════════════════════════════════════════════════════════════════════════════
 
 st.header("🔍 Data Quality")

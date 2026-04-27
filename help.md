@@ -30,3 +30,21 @@
 
 .venv/bin/python -m data.collectors.fundamentals # re-fetches + updates equity/asset fields
 .venv/bin/python -c "from analysis.fundamental.banking_metrics import run_all; run_all()"
+
+# manual paper trading steps
+
+# 1. Download today's prices first
+
+.venv/bin/python -m scheduler.daily_runner once
+
+# 2. Generate today's signals
+
+.venv/bin/python -c "from analysis.technical.signals import generate_all; generate_all()"
+
+# 3. Enter trades
+
+.venv/bin/python -m paper_trading.simulator
+
+# 4. Check stops/targets + see P&L report
+
+.venv/bin/python -m paper_trading.tracker
