@@ -2,15 +2,14 @@
 Technical indicators — computed on adjusted_close only.
 
 All data loaded with date <= as_of_date so no future data leaks in.
-Uses pandas-ta for all indicator maths.
+Uses pure pandas/numpy only — no pandas-ta, no numba, no LLVM required.
 """
 
-from datetime import date, datetime
+from datetime import date
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
 from loguru import logger
 
 from config.settings import (
@@ -19,15 +18,80 @@ from config.settings import (
 )
 from data.storage.database import OHLCVDaily, get_session
 
-# ── Column finder helper ───────────────────────────────────────────────────────
 
-def _col(df: pd.DataFrame, *prefixes: str) -> Optional[str]:
-    """Return the first column name that starts with any of the given prefixes."""
-    for p in prefixes:
-        matches = [c for c in df.columns if str(c).startswith(p)]
-        if matches:
-            return matches[0]
-    return None
+# ── Pure-pandas indicator implementations ─────────────────────────────────────
+
+def _ema(series: pd.Series, length: int) -> pd.Series:
+    return series.ewm(span=length, adjust=False).mean()
+
+
+def _rsi(series: pd.Series, length: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain  = delta.clip(lower=0)
+    loss  = (-delta).clip(lower=0)
+    avg_gain = gain.ewm(com=length - 1, adjust=False).mean()
+    avg_loss = loss.ewm(com=length - 1, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def _macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+    """Returns (macd_line, signal_line, histogram) as three Series."""
+    ema_fast   = _ema(series, fast)
+    ema_slow   = _ema(series, slow)
+    macd_line  = ema_fast - ema_slow
+    signal_line = _ema(macd_line, signal)
+    histogram   = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+
+def _bbands(series: pd.Series, length: int = 20, std: float = 2.0):
+    """Returns (upper, mid, lower, pct_b) as four Series."""
+    mid   = series.rolling(length).mean()
+    sigma = series.rolling(length).std(ddof=0)
+    upper = mid + std * sigma
+    lower = mid - std * sigma
+    pct_b = (series - lower) / (upper - lower).replace(0, np.nan)
+    return upper, mid, lower, pct_b
+
+
+def _true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        (high - low).abs(),
+        (high - prev_close).abs(),
+        (low  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    return tr
+
+
+def _atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14) -> pd.Series:
+    tr = _true_range(high, low, close)
+    return tr.ewm(com=length - 1, adjust=False).mean()
+
+
+def _obv(close: pd.Series, volume: pd.Series) -> pd.Series:
+    direction = np.sign(close.diff()).fillna(0)
+    return (direction * volume).cumsum()
+
+
+def _adx(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14):
+    """Returns (adx, plus_di, minus_di) as three Series."""
+    tr = _true_range(high, low, close)
+
+    up_move   = high.diff()
+    down_move = -(low.diff())
+
+    plus_dm  = up_move.where((up_move > down_move) & (up_move > 0),   0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+    atr_s     = tr.ewm(com=length - 1, adjust=False).mean()
+    plus_di   = 100.0 * plus_dm.ewm(com=length - 1,  adjust=False).mean() / atr_s.replace(0, np.nan)
+    minus_di  = 100.0 * minus_dm.ewm(com=length - 1, adjust=False).mean() / atr_s.replace(0, np.nan)
+
+    dx  = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    adx = dx.ewm(com=length - 1, adjust=False).mean()
+    return adx, plus_di, minus_di
 
 
 # ── Data loader ────────────────────────────────────────────────────────────────
@@ -69,7 +133,7 @@ def load_ohlcv(symbol: str, as_of_date: Optional[date] = None) -> pd.DataFrame:
 
 def compute_all(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Add all technical indicators to a OHLCV DataFrame.
+    Add all technical indicators to an OHLCV DataFrame.
     Input must have columns: open, high, low, adjusted_close, volume.
     All indicators use adjusted_close as the price series.
     Returns the DataFrame with new indicator columns appended.
@@ -77,7 +141,7 @@ def compute_all(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or len(df) < 20:
         return df
 
-    df = df.copy()
+    df    = df.copy()
     close  = df["adjusted_close"]
     high   = df["high"]
     low    = df["low"]
@@ -85,47 +149,41 @@ def compute_all(df: pd.DataFrame) -> pd.DataFrame:
 
     # EMA 9, 21, 50, 200
     for p in EMA_PERIODS:
-        df[f"ema_{p}"] = ta.ema(close, length=p)
+        df[f"ema_{p}"] = _ema(close, p)
 
     # RSI
-    df["rsi"] = ta.rsi(close, length=RSI_PERIOD)
+    df["rsi"] = _rsi(close, RSI_PERIOD)
 
-    # MACD — flatten into 3 columns
-    macd_df = ta.macd(close, fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
-    if macd_df is not None:
-        df["macd"]        = macd_df[_col(macd_df, "MACD_")]
-        df["macd_signal"] = macd_df[_col(macd_df, "MACDs_")]
-        df["macd_hist"]   = macd_df[_col(macd_df, "MACDh_")]
+    # MACD
+    macd_line, signal_line, histogram = _macd(close, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+    df["macd"]        = macd_line
+    df["macd_signal"] = signal_line
+    df["macd_hist"]   = histogram
 
     # Bollinger Bands
-    bb_df = ta.bbands(close, length=BB_PERIOD, std=BB_STD)
-    if bb_df is not None:
-        df["bb_upper"] = bb_df[_col(bb_df, "BBU_")]
-        df["bb_mid"]   = bb_df[_col(bb_df, "BBM_")]
-        df["bb_lower"] = bb_df[_col(bb_df, "BBL_")]
-        df["bb_pct"]   = bb_df[_col(bb_df, "BBP_")]  # 0=at lower, 1=at upper band
+    bb_upper, bb_mid, bb_lower, bb_pct = _bbands(close, BB_PERIOD, BB_STD)
+    df["bb_upper"] = bb_upper
+    df["bb_mid"]   = bb_mid
+    df["bb_lower"] = bb_lower
+    df["bb_pct"]   = bb_pct
 
     # ATR
-    atr_s = ta.atr(high, low, close, length=ATR_PERIOD)
-    if atr_s is not None:
-        df["atr"] = atr_s
+    df["atr"] = _atr(high, low, close, ATR_PERIOD)
 
     # OBV
-    df["obv"] = ta.obv(close, volume)
+    df["obv"] = _obv(close, volume)
 
     # ADX
-    adx_df = ta.adx(high, low, close, length=ADX_PERIOD)
-    if adx_df is not None:
-        df["adx"] = adx_df[_col(adx_df, "ADX_")]
-        df["dmp"] = adx_df[_col(adx_df, "DMP_")]   # +DI (buyers)
-        df["dmn"] = adx_df[_col(adx_df, "DMN_")]   # -DI (sellers)
+    adx_val, plus_di, minus_di = _adx(high, low, close, ADX_PERIOD)
+    df["adx"] = adx_val
+    df["dmp"] = plus_di
+    df["dmn"] = minus_di
 
-    # Rolling 20-day VWAP — approximation for daily timeframe
-    # Institutional traders use VWAP to benchmark entries; price above = bullish
-    typical = (df["high"] + df["low"] + df["adjusted_close"]) / 3
+    # Rolling 20-day VWAP
+    typical    = (high + low + close) / 3.0
     df["vwap_20"] = (typical * volume).rolling(20).sum() / volume.rolling(20).sum()
 
-    # 10-day OBV slope (positive = accumulation, negative = distribution)
+    # 10-day OBV slope
     df["obv_slope"] = df["obv"].diff(10)
 
     return df
