@@ -44,11 +44,13 @@ def compute_ratios(symbol: str, signal_time: datetime) -> dict:
 
         ratios: dict = {"period_end_date": str(fund.period_end_date)}
 
-        if fund.pat and fund.total_equity and fund.total_equity > 0:
-            ratios["roe"] = round(fund.pat / fund.total_equity * 100, 2)
+        annualized_pat = (fund.pat * 4) if (fund.pat and fund.period_type == "Q") else fund.pat
 
-        if fund.pat and fund.total_assets and fund.total_assets > 0:
-            ratios["roa"] = round(fund.pat / fund.total_assets * 100, 2)
+        if annualized_pat and fund.total_equity and fund.total_equity > 0:
+            ratios["roe"] = round(annualized_pat / fund.total_equity * 100, 2)
+
+        if annualized_pat and fund.total_assets and fund.total_assets > 0:
+            ratios["roa"] = round(annualized_pat / fund.total_assets * 100, 2)
 
         if fund.total_debt is not None and fund.total_equity and fund.total_equity > 0:
             ratios["debt_equity"] = round(fund.total_debt / fund.total_equity, 2)

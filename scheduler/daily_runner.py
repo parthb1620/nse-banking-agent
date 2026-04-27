@@ -1,12 +1,16 @@
 """
-APScheduler orchestrator — daily data collection pipeline.
+APScheduler orchestrator — daily data collection + alert pipeline.
 
 Jobs:
-  16:00 IST — collect EOD Bhavcopy, run quality checks, update fundamentals/news
-  (morning_scan and eod_report alert jobs are added in Phase 5)
+  08:30 IST — morning_scan: news sentiment + top picks Telegram alert
+  16:15 IST — eod_collection: Bhavcopy + quality + fundamentals/news
+  16:15 IST — eod_report: updated scores + signal Telegram alert
 
 Run from project root:
-  python -m scheduler.daily_runner
+  python -m scheduler.daily_runner          # start scheduler (blocking)
+  python -m scheduler.daily_runner once     # run EOD collection once now
+  python -m scheduler.daily_runner morning  # run morning scan once now
+  python -m scheduler.daily_runner eod      # run EOD report once now
 """
 
 import sys
@@ -16,7 +20,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from loguru import logger
 
 from config.nse_calendar import is_trading_day
-from config.settings import EOD_REPORT_TIME, LOG_LEVEL, LOG_DIR, SCHEDULER_TIMEZONE
+from config.settings import EOD_REPORT_TIME, MORNING_SCAN_TIME, LOG_LEVEL, LOG_DIR, SCHEDULER_TIMEZONE
 
 # ── Logging setup ──────────────────────────────────────────────────────────────
 logger.remove()
@@ -101,31 +105,64 @@ def eod_collection_job() -> None:
     logger.info(f"=== EOD collection job completed for {today} ===")
 
 
+def morning_scan_job() -> None:
+    """08:30 IST — news + sentiment + top picks Telegram alert."""
+    from scheduler.jobs.morning_scan import run
+    run()
+
+
+def eod_report_job() -> None:
+    """16:15 IST — updated scores + signals Telegram alert."""
+    from scheduler.jobs.eod_report import run
+    run()
+
+
 def run_once() -> None:
-    """Run the EOD job immediately (useful for manual backfill / testing)."""
+    """Run the EOD collection job immediately."""
     eod_collection_job()
 
 
 def start_scheduler() -> None:
     """Start the blocking scheduler. Runs until Ctrl+C."""
-    # Ensure DB tables exist before starting
     from data.storage.database import init_db
     init_db()
 
     scheduler = BlockingScheduler(timezone=SCHEDULER_TIMEZONE)
 
-    hour, minute = EOD_REPORT_TIME.split(":")
+    # Morning scan at 08:30 IST
+    mh, mm = MORNING_SCAN_TIME.split(":")
+    scheduler.add_job(
+        morning_scan_job,
+        trigger="cron",
+        hour=int(mh), minute=int(mm),
+        id="morning_scan",
+        name="Morning scan + alert",
+        misfire_grace_time=300,
+    )
+
+    # EOD collection + report at 16:15 IST
+    eh, em = EOD_REPORT_TIME.split(":")
     scheduler.add_job(
         eod_collection_job,
         trigger="cron",
-        hour=int(hour),
-        minute=int(minute),
+        hour=int(eh), minute=int(em),
         id="eod_collection",
         name="EOD data collection",
-        misfire_grace_time=300,   # allow up to 5 min late start
+        misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        eod_report_job,
+        trigger="cron",
+        hour=int(eh), minute=int(em) + 2,   # 2 min after collection
+        id="eod_report",
+        name="EOD report + alert",
+        misfire_grace_time=300,
     )
 
-    logger.info(f"Scheduler started — EOD job at {EOD_REPORT_TIME} {SCHEDULER_TIMEZONE}")
+    logger.info(
+        f"Scheduler started — morning={MORNING_SCAN_TIME} "
+        f"eod={EOD_REPORT_TIME} ({SCHEDULER_TIMEZONE})"
+    )
     logger.info("Press Ctrl+C to stop.")
 
     try:
@@ -135,7 +172,12 @@ def start_scheduler() -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "once":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "once":
         run_once()
+    elif cmd == "morning":
+        morning_scan_job()
+    elif cmd == "eod":
+        eod_report_job()
     else:
         start_scheduler()

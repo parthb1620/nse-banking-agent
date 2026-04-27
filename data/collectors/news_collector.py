@@ -159,3 +159,6 @@ def run_all() -> None:
     """Fetch news for all tracked stocks."""
     for symbol in BANKING_STOCKS:
         fetch_and_store(symbol)
+
+
+collect_all = run_all   # alias

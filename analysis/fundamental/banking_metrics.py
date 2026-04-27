@@ -80,8 +80,16 @@ def score(symbol: str, signal_time: datetime) -> float:
         logger.warning(f"No banking metrics found for {symbol} at {signal_time}")
         return 50.0
 
-    scores = [_score_metric(getattr(metric, k), k) for k in _THRESHOLDS]
-    return round(sum(scores) / len(scores), 2)
+    component_scores = []
+    for k in _THRESHOLDS:
+        val = getattr(metric, k)
+        if val is not None:
+            component_scores.append(_score_metric(val, k))
+
+    if not component_scores:
+        return 50.0
+
+    return round(sum(component_scores) / len(component_scores), 2)
 
 
 def populate_from_fundamentals(symbol: str) -> int:
@@ -111,18 +119,21 @@ def populate_from_fundamentals(symbol: str) -> int:
             if exists:
                 # Update derivable fields if not already set
                 changed = False
-                if exists.roe is None and f.pat and f.total_equity and f.total_equity > 0:
-                    exists.roe = round(f.pat / f.total_equity * 100, 2)
+                annualized_pat = (f.pat * 4) if (f.pat and f.period_type == "Q") else f.pat
+                if exists.roe is None and annualized_pat and f.total_equity and f.total_equity > 0:
+                    exists.roe = round(annualized_pat / f.total_equity * 100, 2)
                     changed = True
-                if exists.roa is None and f.pat and f.total_assets and f.total_assets > 0:
-                    exists.roa = round(f.pat / f.total_assets * 100, 2)
+                if exists.roa is None and annualized_pat and f.total_assets and f.total_assets > 0:
+                    exists.roa = round(annualized_pat / f.total_assets * 100, 2)
                     changed = True
                 if changed:
                     session.commit()
                 continue
 
-            roe = round(f.pat / f.total_equity * 100, 2) if (f.pat and f.total_equity and f.total_equity > 0) else None
-            roa = round(f.pat / f.total_assets * 100, 2) if (f.pat and f.total_assets and f.total_assets > 0) else None
+            # Annualize quarterly PAT (×4) before dividing by annual balance sheet totals
+            annualized_pat = (f.pat * 4) if (f.pat and f.period_type == "Q") else f.pat
+            roe = round(annualized_pat / f.total_equity * 100, 2) if (annualized_pat and f.total_equity and f.total_equity > 0) else None
+            roa = round(annualized_pat / f.total_assets * 100, 2) if (annualized_pat and f.total_assets and f.total_assets > 0) else None
 
             usable_from = f.usable_from or compute_usable_from(
                 f.announced_at or datetime.combine(f.period_end_date, datetime.min.time())

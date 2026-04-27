@@ -60,6 +60,90 @@ def _parse_number(text: str) -> float | None:
         return None
 
 
+def _parse_balance_sheet_table(soup: BeautifulSoup) -> dict:
+    """
+    Parse the annual balance sheet section from Screener.in.
+    Returns {date: {"total_equity": float, "total_assets": float}} keyed by fiscal year-end date.
+    """
+    result = {}
+    table = soup.find("section", id="balance-sheet")
+    if not table:
+        return result
+
+    thead = table.find("thead")
+    if not thead:
+        return result
+
+    headers = [th.get_text(strip=True) for th in thead.find_all("th")]
+    period_dates = headers[1:]
+
+    row_data: dict[str, list[str]] = {}
+    tbody = table.find("tbody")
+    if tbody:
+        for tr in tbody.find_all("tr"):
+            cells = tr.find_all("td")
+            if len(cells) < 2:
+                continue
+            label = cells[0].get_text(strip=True)
+            values = [c.get_text(strip=True) for c in cells[1:]]
+            row_data[label] = values
+
+    month_map = {
+        "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+        "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+    }
+
+    for i, period_str in enumerate(period_dates):
+        try:
+            parts = period_str.split()
+            if len(parts) != 2:
+                continue
+            month = month_map.get(parts[0])
+            year = int(parts[1])
+            if not month:
+                continue
+            last_day = (date(year, month % 12 + 1, 1) - timedelta(days=1)) if month < 12 else date(year, 12, 31)
+
+            def _get(label_substr: str) -> float | None:
+                for k, vals in row_data.items():
+                    if label_substr.lower() in k.lower() and i < len(vals):
+                        return _parse_number(vals[i])
+                return None
+
+            share_capital = _get("Share Capital") or 0.0
+            reserves      = _get("Reserves") or 0.0
+            total_equity  = (share_capital + reserves) or None
+            total_assets  = _get("Total Assets") or _get("Total Liabilities")
+
+            if total_equity or total_assets:
+                result[last_day] = {
+                    "total_equity": total_equity,
+                    "total_assets": total_assets,
+                }
+        except Exception as exc:
+            logger.debug(f"Could not parse balance sheet period '{period_str}': {exc}")
+
+    return result
+
+
+def _match_annual_to_quarter(bs_data: dict, period_end: date) -> dict:
+    """
+    Find the closest annual balance sheet entry for a quarterly period.
+    Prefers entries on or before the quarter end, with up to 90 days look-forward
+    to handle year-end quarters where annual and quarterly coincide.
+    """
+    if not bs_data:
+        return {}
+    candidates = [
+        (d, v) for d, v in bs_data.items()
+        if d <= period_end + timedelta(days=90)
+    ]
+    if not candidates:
+        # Use earliest available (no prior annual data — take oldest)
+        return min(bs_data.items(), key=lambda x: x[0])[1]
+    return max(candidates, key=lambda x: x[0])[1]
+
+
 def _parse_quarterly_table(soup: BeautifulSoup) -> list[dict]:
     """
     Parse the quarterly results table from Screener.in.
@@ -138,22 +222,38 @@ def fetch_and_store(symbol: str) -> int:
 
     time.sleep(SCREENER_DELAY_SEC)   # be respectful to Screener.in
 
-    periods = _parse_quarterly_table(soup)
+    periods  = _parse_quarterly_table(soup)
+    bs_data  = _parse_balance_sheet_table(soup)
+
     if not periods:
         logger.warning(f"Screener.in: no quarterly data parsed for {symbol}")
         return 0
 
     now      = datetime.utcnow()
     inserted = 0
+    updated  = 0
 
     with get_session() as session:
         for p in periods:
+            bs = _match_annual_to_quarter(bs_data, p["period_end_date"])
+
             exists = session.query(Fundamental).filter_by(
                 symbol=symbol,
                 period_end_date=p["period_end_date"],
                 period_type=p["period_type"],
             ).first()
+
             if exists:
+                # Fill in balance sheet fields if they were missing on first insert
+                changed = False
+                if exists.total_equity is None and bs.get("total_equity"):
+                    exists.total_equity = bs["total_equity"]
+                    changed = True
+                if exists.total_assets is None and bs.get("total_assets"):
+                    exists.total_assets = bs["total_assets"]
+                    changed = True
+                if changed:
+                    updated += 1
                 continue
 
             # Conservative usable_from: period end + 45 days (results usually out within 45 days)
@@ -171,6 +271,8 @@ def fetch_and_store(symbol: str) -> int:
                 pat=p.get("pat"),
                 ebitda=p.get("ebitda"),
                 eps=p.get("eps"),
+                total_equity=bs.get("total_equity"),
+                total_assets=bs.get("total_assets"),
                 published_at=now,
                 collected_at=now,
                 usable_from=usable_from,
@@ -179,7 +281,8 @@ def fetch_and_store(symbol: str) -> int:
 
         session.commit()
 
-    logger.info(f"Screener.in: inserted {inserted} fundamental rows for {symbol}")
+    if inserted or updated:
+        logger.info(f"Screener.in: inserted {inserted}, updated {updated} fundamental rows for {symbol}")
     return inserted
 
 
@@ -187,3 +290,6 @@ def run_all() -> None:
     """Fetch fundamentals for all tracked stocks."""
     for symbol in BANKING_STOCKS:
         fetch_and_store(symbol)
+
+
+fetch_all = run_all   # alias
