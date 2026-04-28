@@ -136,6 +136,27 @@ def eod_report_job() -> None:
     run()
 
 
+def monthly_optimize_job() -> None:
+    """1st of each month, 07:00 IST — walk-forward optimize all 7 stocks."""
+    logger.info("=== Monthly walk-forward optimization started ===")
+    try:
+        from backtesting.optimizer import optimize_all
+        results = optimize_all()
+        summary = "  ".join(
+            f"{sym}(RSI {p.get('rsi_entry_low')}-{p.get('rsi_entry_high')} ATR×{p.get('atr_stop_multiplier')})"
+            for sym, p in results.items()
+        )
+        logger.info(f"Optimization complete: {summary}")
+        try:
+            from alerts.telegram_bot import send
+            send(f"🔧 <b>Monthly optimizer complete</b>\n\n{summary.replace('  ', chr(10))}")
+        except Exception:
+            pass
+    except Exception as exc:
+        logger.error(f"Monthly optimization failed: {exc}")
+    logger.info("=== Monthly walk-forward optimization done ===")
+
+
 def run_once() -> None:
     """Run the EOD collection job immediately."""
     eod_collection_job()
@@ -198,6 +219,16 @@ def start_scheduler() -> None:
         misfire_grace_time=300,
     )
 
+    # Walk-forward optimizer on 1st of each month at 07:00 IST (before market open)
+    scheduler.add_job(
+        monthly_optimize_job,
+        trigger="cron",
+        day=1, hour=7, minute=0,
+        id="monthly_optimize",
+        name="Monthly walk-forward optimizer",
+        misfire_grace_time=3600,
+    )
+
     logger.info(
         f"Scheduler started — morning={MORNING_SCAN_TIME} "
         f"eod={EOD_REPORT_TIME} ({SCHEDULER_TIMEZONE})"
@@ -222,5 +253,7 @@ if __name__ == "__main__":
         paper_trading_entry_job()
     elif cmd == "paper_exit":
         paper_trading_exit_job()
+    elif cmd == "optimize":
+        monthly_optimize_job()
     else:
         start_scheduler()

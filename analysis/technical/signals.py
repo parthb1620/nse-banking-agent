@@ -35,13 +35,33 @@ from data.storage.database import TechnicalSignal, get_session
 _IST = ZoneInfo("Asia/Kolkata")
 
 
+def _optimized_thresholds(symbol: str) -> tuple[float, float, float]:
+    """
+    Return (rsi_entry_low, rsi_entry_high, rsi_exit) from walk-forward optimizer
+    results if available, otherwise fall back to settings defaults.
+    """
+    try:
+        from backtesting.optimizer import load_best_params
+        p = load_best_params(symbol)
+        return (
+            p.get("rsi_entry_low",  RSI_ENTRY_LOW),
+            p.get("rsi_entry_high", RSI_ENTRY_HIGH),
+            p.get("rsi_exit",       RSI_EXIT),
+        )
+    except Exception:
+        return RSI_ENTRY_LOW, RSI_ENTRY_HIGH, RSI_EXIT
+
+
 # ── Core scoring logic ─────────────────────────────────────────────────────────
 
-def _evaluate(row: dict, prev_row: Optional[dict] = None) -> tuple[str, int, list[str], float]:
+def _evaluate(row: dict, prev_row: Optional[dict] = None, symbol: str = "") -> tuple[str, int, list[str], float]:
     """
     Evaluate one indicator row and return (signal_type, strength, reasons, tech_score_0_100).
     prev_row is used to detect MACD histogram direction change.
     """
+    # Load optimized thresholds if available
+    rsi_low, rsi_high, rsi_exit_val = _optimized_thresholds(symbol) if symbol else (RSI_ENTRY_LOW, RSI_ENTRY_HIGH, RSI_EXIT)
+
     price     = row.get("adjusted_close") or row.get("close")
     rsi       = row.get("rsi")
     macd_hist = row.get("macd_hist")
@@ -57,8 +77,8 @@ def _evaluate(row: dict, prev_row: Optional[dict] = None) -> tuple[str, int, lis
 
     # ── SELL check first (exit signals override entry) ─────────────────────────
     sell_reasons = []
-    if rsi is not None and rsi > RSI_EXIT:
-        sell_reasons.append(f"RSI {rsi:.1f} > {RSI_EXIT} (overbought)")
+    if rsi is not None and rsi > rsi_exit_val:
+        sell_reasons.append(f"RSI {rsi:.1f} > {rsi_exit_val} (overbought)")
     if ema_21 is not None and price < ema_21:
         sell_reasons.append(f"price {price:.2f} < EMA_21 {ema_21:.2f} (trend breakdown)")
     if macd_hist is not None and macd_hist < -0.5:
@@ -72,7 +92,7 @@ def _evaluate(row: dict, prev_row: Optional[dict] = None) -> tuple[str, int, lis
     # ── BUY check ──────────────────────────────────────────────────────────────
     # Three required gates
     gate_regime   = ema_200 is not None and price > ema_200
-    gate_rsi      = rsi is not None and RSI_ENTRY_LOW <= rsi <= RSI_ENTRY_HIGH
+    gate_rsi      = rsi is not None and rsi_low <= rsi <= rsi_high
     gate_momentum = macd_hist is not None and macd_hist > 0
 
     buy_reasons  = []
@@ -81,7 +101,7 @@ def _evaluate(row: dict, prev_row: Optional[dict] = None) -> tuple[str, int, lis
     if gate_regime:
         buy_reasons.append(f"price {price:.2f} > EMA_200 {ema_200:.2f}")
     if gate_rsi:
-        buy_reasons.append(f"RSI {rsi:.1f} in entry zone [{RSI_ENTRY_LOW}–{RSI_ENTRY_HIGH}]")
+        buy_reasons.append(f"RSI {rsi:.1f} in entry zone [{rsi_low}–{rsi_high}]")
     if gate_momentum:
         buy_reasons.append(f"MACD hist {macd_hist:.3f} > 0 (positive momentum)")
 
@@ -149,7 +169,7 @@ def generate_signal(symbol: str, signal_date: Optional[date] = None) -> Optional
     row      = df.iloc[-1].to_dict()
     prev_row = df.iloc[-2].to_dict() if len(df) >= 2 else None
 
-    signal_type, strength, reasons, tech_score = _evaluate(row, prev_row)
+    signal_type, strength, reasons, tech_score = _evaluate(row, prev_row, symbol=symbol)
 
     indicators_snap = {
         k: (None if (v is None or (isinstance(v, float) and __import__("math").isnan(v)))
@@ -190,7 +210,7 @@ def score(symbol: str, signal_time: datetime) -> float:
     row = get_latest_row(symbol, as_of_date=signal_time.date())
     if not row:
         return 50.0
-    _, _, _, tech_score = _evaluate(row)
+    _, _, _, tech_score = _evaluate(row, symbol=symbol)
     return tech_score
 
 

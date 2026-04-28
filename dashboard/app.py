@@ -384,3 +384,120 @@ try:
     st.caption("Source = yfinance means data is unverified. NSE Bhavcopy is the authoritative source.")
 except Exception as e:
     st.error(f"Could not load quality data: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Section 7 — Backtesting
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.header("🧪 Backtesting")
+
+_bt_years = st.slider("Backtest window (years)", 1, 5, 3, key="bt_years")
+_bt_use_opt = st.checkbox("Use walk-forward optimized params", value=False, key="bt_opt")
+
+if st.button("Run backtest", key="run_bt"):
+    _bt_end   = date.today()
+    _bt_start = _bt_end.replace(year=_bt_end.year - _bt_years)
+
+    with st.spinner("Running backtest..."):
+        try:
+            from backtesting.engine import BacktestEngine
+            from backtesting.metrics import compute_metrics
+
+            _engine = BacktestEngine(initial_capital=100_000)
+
+            if _bt_use_opt:
+                from backtesting.optimizer import load_best_params
+                _all_results = {
+                    sym: _engine.run(sym, _bt_start, _bt_end, params=load_best_params(sym))
+                    for sym in BANKING_STOCKS
+                }
+            else:
+                _all_results = {
+                    sym: _engine.run(sym, _bt_start, _bt_end)
+                    for sym in BANKING_STOCKS
+                }
+
+            # ── Summary table ─────────────────────────────────────────────────
+            _rows = []
+            for sym, res in _all_results.items():
+                m = compute_metrics(res)
+                _rows.append({
+                    "Symbol":       sym,
+                    "Return %":     m["total_return_pct"],
+                    "CAGR %":       m["cagr_pct"],
+                    "Sharpe":       m["sharpe"],
+                    "Max DD %":     m["max_drawdown_pct"],
+                    "Trades":       m["total_trades"],
+                    "Win Rate %":   m["win_rate_pct"],
+                    "Profit Factor": m["profit_factor"],
+                    "Avg Hold Days": m["avg_hold_days"],
+                })
+            _summary_df = pd.DataFrame(_rows).set_index("Symbol")
+            st.subheader("Strategy Summary")
+            st.dataframe(
+                _summary_df.style.format({
+                    "Return %": "{:+.1f}", "CAGR %": "{:+.1f}",
+                    "Sharpe": "{:.2f}", "Max DD %": "{:.1f}",
+                    "Win Rate %": "{:.1f}", "Profit Factor": "{:.2f}",
+                    "Avg Hold Days": "{:.1f}",
+                }),
+                use_container_width=True,
+            )
+
+            # ── Equity curves ─────────────────────────────────────────────────
+            st.subheader("Equity Curves")
+            _fig_eq = go.Figure()
+            for sym, res in _all_results.items():
+                if res.equity_curve is not None and not res.equity_curve.empty:
+                    _fig_eq.add_trace(go.Scatter(
+                        x=res.equity_curve.index,
+                        y=res.equity_curve.values,
+                        name=sym,
+                        mode="lines",
+                    ))
+            _fig_eq.add_hline(y=100_000, line_dash="dot", line_color="grey", annotation_text="Start ₹1L")
+            _fig_eq.update_layout(
+                height=400,
+                margin=dict(l=0, r=0, t=20, b=0),
+                yaxis_title="Portfolio value (₹)",
+                legend=dict(orientation="h", y=1.02),
+            )
+            st.plotly_chart(_fig_eq, use_container_width=True)
+
+            # ── Trade log for selected stock ──────────────────────────────────
+            st.subheader(f"Trade log — {selected_symbol}")
+            _sel_res = _all_results.get(selected_symbol)
+            if _sel_res and _sel_res.trades:
+                _tdf = _sel_res.trade_df()
+                _tdf = _tdf[["entry_date","exit_date","entry_price","exit_price","quantity","stop_loss","target","exit_reason","net_pnl","pnl_pct"]]
+                _tdf.columns = ["Entry","Exit","Entry ₹","Exit ₹","Qty","Stop","Target","Reason","Net P&L ₹","P&L %"]
+                st.dataframe(
+                    _tdf.style.format({
+                        "Entry ₹": "{:.2f}", "Exit ₹": "{:.2f}",
+                        "Stop": "{:.2f}", "Target": "{:.2f}",
+                        "Net P&L ₹": "{:+,.0f}", "P&L %": "{:+.2f}",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("No trades for selected symbol in this period.")
+
+        except Exception as _e:
+            st.error(f"Backtest error: {_e}")
+
+# ── Optimized params view ──────────────────────────────────────────────────────
+with st.expander("Current optimized parameters (from last optimizer run)"):
+    try:
+        from backtesting.optimizer import load_all_params
+        _opt_params = load_all_params()
+        if _opt_params:
+            _opt_df = pd.DataFrame(_opt_params).T
+            st.dataframe(_opt_df, use_container_width=True)
+            st.caption("Run `python -m backtesting.run --optimize` to refresh these.")
+        else:
+            st.info("No optimized params yet. Run: python -m backtesting.run --optimize"
+                    " (or check 'Run optimizer monthly' in scheduler)")
+    except Exception as _e:
+        st.warning(f"Could not load params: {_e}")

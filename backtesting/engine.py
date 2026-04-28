@@ -84,12 +84,17 @@ class BacktestEngine:
         symbol:     str,
         start_date: date,
         end_date:   date,
+        params:     dict | None = None,
+        df:         "pd.DataFrame | None" = None,   # pre-loaded indicators (avoids re-query)
     ) -> BacktestResult:
         """
         Run backtest for one symbol over the date range.
+        params — optional strategy param overrides (see ema_rsi_swing.generate_signals).
+        df     — pass pre-computed indicator DataFrame to skip DB query (used by optimizer).
         Returns a BacktestResult with trade log and daily equity curve.
         """
-        df = get_indicators(symbol, as_of_date=end_date)
+        if df is None:
+            df = get_indicators(symbol, as_of_date=end_date)
         if df.empty or len(df) < 5:
             logger.warning(f"engine: not enough data for {symbol}")
             return BacktestResult(symbol=symbol, initial_capital=self.initial_capital, final_capital=self.initial_capital)
@@ -100,19 +105,20 @@ class BacktestEngine:
             logger.warning(f"engine: only {len(df)} bars for {symbol} in [{start_date}, {end_date}]")
             return BacktestResult(symbol=symbol, initial_capital=self.initial_capital, final_capital=self.initial_capital)
 
-        df = generate_signals(df)
+        df = generate_signals(df, params=params)
         return self._simulate(symbol, df)
 
     def run_all(
         self,
         start_date: date,
         end_date:   date,
+        params:     dict | None = None,
     ) -> dict[str, BacktestResult]:
         """Run backtest for all 7 banking stocks independently."""
         results = {}
         for sym in BANKING_STOCKS:
             try:
-                results[sym] = self.run(sym, start_date, end_date)
+                results[sym] = self.run(sym, start_date, end_date, params=params)
                 trades_n = len(results[sym].trades)
                 final = results[sym].final_capital
                 ret_pct = (final / self.initial_capital - 1) * 100
