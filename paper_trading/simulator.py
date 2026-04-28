@@ -185,6 +185,12 @@ def run(today: date | None = None) -> list[PaperTrade]:
             f"risk=₹{quantity * risk_per_share:,.0f}"
         )
 
+        try:
+            from alerts.telegram_bot import send_trade_entry
+            send_trade_entry(sig.symbol, entry_price, stop_loss, target, quantity, trade.thesis or "")
+        except Exception:
+            pass
+
         new_trades.append(trade)
         open_symbols.add(sig.symbol)
         slots -= 1

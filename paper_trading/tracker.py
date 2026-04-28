@@ -123,6 +123,13 @@ def check_open_trades(today: date | None = None) -> dict[str, list]:
                 f"entry={trade.entry_price:.2f} exit={exit_price:.2f}  "
                 f"qty={trade.quantity}  pnl=₹{net_pnl:,.0f}"
             )
+
+            try:
+                from alerts.telegram_bot import send_trade_exit
+                send_trade_exit(trade.symbol, status, trade.entry_price, round(exit_price, 2), trade.quantity, net_pnl)
+            except Exception:
+                pass
+
             closed.append(trade)
         else:
             still_open.append(trade)
