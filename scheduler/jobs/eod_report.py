@@ -126,10 +126,24 @@ def run() -> None:
     except Exception:
         pass
 
-    # 4. Build and send
+    # 4. Build and send scores/signals
     msg = build_message(scores, signals, prev_scores)
 
-    from alerts.telegram_bot import send_eod_alert
+    from alerts.telegram_bot import send_eod_alert, send_paper_pnl_summary
     sent = send_eod_alert(msg)
+
+    # 5. Paper trading P&L summary
+    try:
+        from paper_trading.tracker import get_summary
+        s = get_summary()
+        send_paper_pnl_summary(
+            capital=s["capital_current"],
+            total_pnl=s["total_pnl"],
+            win_rate=s["win_rate"],
+            trades=s["trades_total"],
+            open_pos=s["trades_open"],
+        )
+    except Exception as exc:
+        logger.warning(f"eod_report: paper trading summary failed — {exc}")
 
     logger.info(f"=== EOD report complete — Telegram {'sent' if sent else 'FAILED'} ===")

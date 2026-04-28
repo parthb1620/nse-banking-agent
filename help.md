@@ -48,3 +48,21 @@
 # 4. Check stops/targets + see P&L report
 
 .venv/bin/python -m paper_trading.tracker
+
+## back test optimizer
+
+# run backtest (baseline)
+
+python -m backtesting.run --years 3
+
+# run optimizer + compare
+
+python -m backtesting.run --optimize --years 3
+
+# optimize one stock only
+
+python -m backtesting.run --optimize --symbol HDFCBANK
+
+# trigger optimizer manually (same as monthly job)
+
+python -m scheduler.daily_runner optimize

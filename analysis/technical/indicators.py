@@ -186,6 +186,12 @@ def compute_all(df: pd.DataFrame) -> pd.DataFrame:
     # 10-day OBV slope
     df["obv_slope"] = df["obv"].diff(10)
 
+    # 20-day volume average — used by signal logic to confirm participation on entry day
+    df["vol_sma_20"] = volume.rolling(20).mean()
+
+    # 10-bar swing low — yesterday-and-prior only (shift 1) so today's bar can't define its own stop
+    df["swing_low_10"] = low.rolling(10).min().shift(1)
+
     return df
 
 
