@@ -83,7 +83,7 @@ def _recent_headlines(n: int = 5) -> list[str]:
         return [f"[{a.symbol}] {a.headline}" for a in arts if a.headline]
 
 
-def build_message(scores: list[dict], signals: dict, headlines: list[str]) -> str:
+def build_message(scores: list[dict], signals: dict, headlines: list[str], fii_status: dict | None = None) -> str:
     """Build the Telegram message body."""
     today = datetime.now(_IST).strftime("%d %b %Y")
     lines = [f"<b>Date:</b> {today}"]
@@ -108,6 +108,20 @@ def build_message(scores: list[dict], signals: dict, headlines: list[str]) -> st
     lines.append("\n📋 <b>Full ranking:</b>")
     for i, r in enumerate(scores, 1):
         lines.append(f"  {i}. {r['symbol']:<12} {r['total_score']:.1f}")
+
+    # FII/DII institutional flow
+    if fii_status and fii_status.get("available"):
+        fii_net  = fii_status.get("fii_net_cr", 0)
+        dii_net  = fii_status.get("dii_net_cr", 0)
+        blocking = fii_status.get("blocking_entries", False)
+        fii_icon = "🟢" if fii_net >= 0 else "🔴"
+        dii_icon = "🟢" if dii_net >= 0 else "🔴"
+        block_str = "  ⛔ <b>NEW ENTRIES BLOCKED</b> (FII selling streak)" if blocking else ""
+        lines.append(
+            f"\n🏦 <b>Institutional flows:</b>\n"
+            f"  {fii_icon} FII {fii_net:+,.0f} Cr  |  {dii_icon} DII {dii_net:+,.0f} Cr"
+            f"{block_str}"
+        )
 
     # Recent news
     if headlines:
@@ -142,11 +156,20 @@ def run() -> None:
     # 4. Latest signals
     signals = _get_signals()
 
-    # 5. Recent headlines
+    # 5. FII/DII flows
+    fii_status: dict = {}
+    try:
+        from data.collectors.fii_dii import run_daily, get_status
+        run_daily()
+        fii_status = get_status()
+    except Exception as exc:
+        logger.warning(f"morning_scan: FII/DII fetch failed — {exc}")
+
+    # 6. Recent headlines
     headlines = _recent_headlines()
 
-    # 6. Build and send alert
-    msg = build_message(scores, signals, headlines)
+    # 7. Build and send alert
+    msg = build_message(scores, signals, headlines, fii_status)
 
     from alerts.telegram_bot import send_morning_alert
     sent = send_morning_alert(msg)

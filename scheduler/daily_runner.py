@@ -102,6 +102,13 @@ def eod_collection_job() -> None:
     except Exception as exc:
         logger.error(f"News/filings step failed: {exc}")
 
+    # Step 5b: FII/DII daily flows
+    try:
+        from data.collectors.fii_dii import run_daily as run_fii_dii
+        run_fii_dii()
+    except Exception as exc:
+        logger.error(f"FII/DII collection failed: {exc}")
+
     # Step 6: Banking metrics
     try:
         from analysis.fundamental.banking_metrics import run_all as run_metrics

@@ -224,6 +224,10 @@ class PaperTrade(Base):
     Simulated trades logged by paper_trading/simulator.py.
     Entry always at next-day open. Stop-first rule applies when stop and target both hit same day.
     status: 'open' | 'closed_target' | 'closed_stop' | 'closed_manual'
+
+    Partial-profit fields (populated when half is booked at 1R):
+      partial_qty / partial_exit_price / partial_exit_date / partial_pnl
+    Final pnl column = partial_pnl + remaining-quantity pnl after costs.
     """
     __tablename__ = "paper_trades"
 
@@ -240,6 +244,11 @@ class PaperTrade(Base):
     pnl:         Mapped[Optional[float]] = mapped_column(sa.Float)
     thesis:      Mapped[Optional[str]]   = mapped_column(sa.Text)
     signal_id:   Mapped[Optional[int]]   = mapped_column(sa.Integer, sa.ForeignKey("technical_signals.id"))
+
+    partial_qty:        Mapped[Optional[int]]   = mapped_column(sa.Integer)
+    partial_exit_price: Mapped[Optional[float]] = mapped_column(sa.Float)
+    partial_exit_date:  Mapped[Optional[datetime]] = mapped_column(sa.Date)
+    partial_pnl:        Mapped[Optional[float]] = mapped_column(sa.Float)
 
     __table_args__ = (sa.Index("ix_paper_trades_symbol", "symbol"),)
 
@@ -306,9 +315,30 @@ def _set_sqlite_pragma(dbapi_conn, _):
         cursor.close()
 
 
+def _migrate_paper_trades() -> None:
+    """
+    SQLite-only ALTER TABLE migration: add partial-profit columns to an existing
+    paper_trades table. create_all() does not add new columns, so we patch them in.
+    """
+    if not DB_URL.startswith("sqlite"):
+        return
+    new_cols = {
+        "partial_qty":        "INTEGER",
+        "partial_exit_price": "REAL",
+        "partial_exit_date":  "DATE",
+        "partial_pnl":        "REAL",
+    }
+    with engine.begin() as conn:
+        existing = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(paper_trades)").fetchall()}
+        for col, sql_type in new_cols.items():
+            if col not in existing:
+                conn.exec_driver_sql(f"ALTER TABLE paper_trades ADD COLUMN {col} {sql_type}")
+
+
 def init_db() -> None:
     """Create all tables if they don't exist. Safe to call on every startup."""
     Base.metadata.create_all(engine)
+    _migrate_paper_trades()
 
 
 def get_session() -> Session:

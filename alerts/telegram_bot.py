@@ -65,6 +65,17 @@ def send_trade_entry(symbol: str, entry: float, stop: float, target: float, qty:
     return send(msg)
 
 
+def send_trade_partial(symbol: str, entry: float, exit_price: float, qty: int, total_qty: int, pnl: float) -> bool:
+    pct = (exit_price - entry) / entry * 100
+    msg = (
+        f"💰 <b>Paper Trade PARTIAL BOOKED (1R)</b>\n\n"
+        f"<b>{symbol}</b>  booked qty={qty}/{total_qty}  (rest runs with stop at breakeven)\n"
+        f"Entry ₹{entry:.2f} → Partial exit ₹{exit_price:.2f}  ({pct:+.1f}%)\n"
+        f"Booked P&L <b>₹{pnl:+,.0f}</b>"
+    )
+    return send(msg)
+
+
 def send_trade_exit(symbol: str, status: str, entry: float, exit_price: float, qty: int, pnl: float) -> bool:
     icon   = "🎯" if "target" in status else "🛑"
     result = "TARGET HIT" if "target" in status else "STOP HIT"

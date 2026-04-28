@@ -26,8 +26,9 @@ from loguru import logger
 from config.nse_calendar import is_trading_day
 from config.settings import (
     ATR_STOP_MULTIPLIER, BANKING_STOCKS, DAILY_LOSS_LIMIT_PCT,
-    MAX_OPEN_POSITIONS, MIN_RISK_REWARD, PAPER_TRADING_CAPITAL,
-    RISK_PER_TRADE_PCT, STOCK_NAMES,
+    FII_SELL_STREAK_DAYS, MAX_OPEN_POSITIONS, MIN_RISK_REWARD,
+    MIN_SIGNAL_STRENGTH, PAPER_TRADING_CAPITAL, RISK_PER_TRADE_PCT, STOCK_NAMES,
+    SWING_LOW_BUFFER_ATR,
 )
 from data.storage.database import OHLCVDaily, PaperTrade, TechnicalSignal, get_session
 
@@ -81,12 +82,15 @@ def _todays_open(symbol: str, today: date) -> float | None:
     return row.open if row and row.open else None
 
 
-def _latest_atr(symbol: str, today: date) -> float | None:
-    """Get ATR_14 from indicators computed as of yesterday (pre-open)."""
+def _latest_indicators(symbol: str, today: date) -> dict:
+    """Get yesterday's indicator row (pre-open snapshot)."""
     from analysis.technical.indicators import get_latest_row
     from datetime import timedelta
-    row = get_latest_row(symbol, as_of_date=today - timedelta(days=1))
-    return row.get("atr") if row else None
+    return get_latest_row(symbol, as_of_date=today - timedelta(days=1)) or {}
+
+
+def _latest_atr(symbol: str, today: date) -> float | None:
+    return _latest_indicators(symbol, today).get("atr")
 
 
 def run(today: date | None = None) -> list[PaperTrade]:
@@ -111,6 +115,18 @@ def run(today: date | None = None) -> list[PaperTrade]:
         )
         return []
 
+    # FII selling streak circuit breaker
+    try:
+        from data.collectors.fii_dii import is_fii_selling_streak
+        if is_fii_selling_streak(days=FII_SELL_STREAK_DAYS):
+            logger.warning(
+                f"simulator: FII net sellers for {FII_SELL_STREAK_DAYS}+ consecutive days "
+                f"— no new entries (institutional headwind)"
+            )
+            return []
+    except Exception as exc:
+        logger.debug(f"simulator: FII/DII check skipped — {exc}")
+
     open_positions = _open_positions()
     open_symbols   = {t.symbol for t in open_positions}
     slots          = MAX_OPEN_POSITIONS - len(open_positions)
@@ -119,7 +135,12 @@ def run(today: date | None = None) -> list[PaperTrade]:
         logger.info(f"simulator: {len(open_positions)} open positions — no slots available")
         return []
 
-    signals   = _buy_signals_today(today)
+    # Only consider high-conviction signals (strength >= MIN_SIGNAL_STRENGTH)
+    signals = [s for s in _buy_signals_today(today) if s.strength >= MIN_SIGNAL_STRENGTH]
+    if not signals:
+        logger.info(f"simulator: no BUY signals with strength >= {MIN_SIGNAL_STRENGTH} today")
+        return []
+
     new_trades: list[PaperTrade] = []
 
     for sig in signals:
@@ -133,12 +154,23 @@ def run(today: date | None = None) -> list[PaperTrade]:
             logger.warning(f"simulator: no open price for {sig.symbol} on {today} — skipping")
             continue
 
-        atr = _latest_atr(sig.symbol, today)
-        if atr is None or atr <= 0:
+        ind = _latest_indicators(sig.symbol, today)
+        atr = ind.get("atr")
+        if atr is None or atr <= 0 or (isinstance(atr, float) and math.isnan(atr)):
             logger.warning(f"simulator: no ATR for {sig.symbol} — skipping")
             continue
 
-        stop_loss = entry_price - ATR_STOP_MULTIPLIER * atr
+        # Stop: structural (just below swing low), clamped to [0.5×ATR, 2×ATR] of entry.
+        # Clamping protects from too-tight (noise pings) AND inflated-ATR cases.
+        floor_stop    = entry_price - ATR_STOP_MULTIPLIER * atr
+        ceiling_stop  = entry_price - 0.5 * atr
+        swing_low     = ind.get("swing_low_10")
+        if swing_low and not (isinstance(swing_low, float) and math.isnan(swing_low)):
+            raw = swing_low - SWING_LOW_BUFFER_ATR * atr
+            stop_loss = max(floor_stop, min(raw, ceiling_stop))
+        else:
+            stop_loss = floor_stop
+
         risk_per_share = entry_price - stop_loss
 
         if risk_per_share <= 0:

@@ -3,15 +3,16 @@ Signal generation — BUY / SELL / NEUTRAL with strength 1–10 and reason list.
 
 Strategy: EMA + RSI + MACD confluence (ema_rsi_swing)
 
-BUY entry (all three required, bonus conditions add strength):
-  REQUIRED  price > EMA_200         — bull regime (regime gate)
-  REQUIRED  RSI in [35, 60]         — entry zone, not overbought or crashed
-  REQUIRED  MACD histogram > 0      — positive momentum
-  +1 bonus  price > EMA_50          — medium-term uptrend
-  +1 bonus  price > EMA_21          — short-term uptrend
-  +1 bonus  ADX > 25                — trending market (avoid choppy ranges)
-  +1 bonus  price > VWAP_20         — above institutional benchmark
-  +1 bonus  OBV slope > 0           — accumulation over last 10 days
+BUY entry (all four required, bonus conditions add strength):
+  REQUIRED  price > EMA_200                      — bull regime (regime gate)
+  REQUIRED  RSI in [35, 60]                      — entry zone, not overbought or crashed
+  REQUIRED  MACD histogram > 0                   — positive momentum
+  REQUIRED  volume ≥ 1.2 × 20-day avg            — institutional participation on entry day
+  +1 bonus  price > EMA_50                       — medium-term uptrend
+  +1 bonus  price > EMA_21                       — short-term uptrend
+  +1 bonus  ADX > 25                             — trending market (avoid choppy ranges)
+  +1 bonus  price > VWAP_20                      — above institutional benchmark
+  +1 bonus  OBV slope > 0                        — accumulation over last 10 days
 
 SELL / exit:
   RSI > 75                          — overbought, take profit
@@ -29,7 +30,11 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 
 from analysis.technical.indicators import get_indicators, get_latest_row
-from config.settings import ADX_TREND_MIN, BANKING_STOCKS, RSI_ENTRY_HIGH, RSI_ENTRY_LOW, RSI_EXIT
+from config.settings import (
+    ADX_TREND_MIN, BANKING_STOCKS,
+    RSI_ENTRY_HIGH, RSI_ENTRY_LOW, RSI_EXIT,
+    VOLUME_CONFIRM_MULTIPLIER,
+)
 from data.storage.database import TechnicalSignal, get_session
 
 _IST = ZoneInfo("Asia/Kolkata")
@@ -62,15 +67,17 @@ def _evaluate(row: dict, prev_row: Optional[dict] = None, symbol: str = "") -> t
     # Load optimized thresholds if available
     rsi_low, rsi_high, rsi_exit_val = _optimized_thresholds(symbol) if symbol else (RSI_ENTRY_LOW, RSI_ENTRY_HIGH, RSI_EXIT)
 
-    price     = row.get("adjusted_close") or row.get("close")
-    rsi       = row.get("rsi")
-    macd_hist = row.get("macd_hist")
-    ema_21    = row.get("ema_21")
-    ema_50    = row.get("ema_50")
-    ema_200   = row.get("ema_200")
-    adx       = row.get("adx")
-    vwap_20   = row.get("vwap_20")
-    obv_slope = row.get("obv_slope")
+    price      = row.get("adjusted_close") or row.get("close")
+    rsi        = row.get("rsi")
+    macd_hist  = row.get("macd_hist")
+    ema_21     = row.get("ema_21")
+    ema_50     = row.get("ema_50")
+    ema_200    = row.get("ema_200")
+    adx        = row.get("adx")
+    vwap_20    = row.get("vwap_20")
+    obv_slope  = row.get("obv_slope")
+    volume     = row.get("volume")
+    vol_sma_20 = row.get("vol_sma_20")
 
     if price is None:
         return "NEUTRAL", 0, ["insufficient data"], 50.0
@@ -90,10 +97,15 @@ def _evaluate(row: dict, prev_row: Optional[dict] = None, symbol: str = "") -> t
         return "SELL", strength, sell_reasons, tech_score
 
     # ── BUY check ──────────────────────────────────────────────────────────────
-    # Three required gates
+    # Four required gates — volume confirms institutional participation on entry day.
+    # If vol_sma_20 isn't available yet (early bars), fail-open so we don't lose old data.
     gate_regime   = ema_200 is not None and price > ema_200
     gate_rsi      = rsi is not None and rsi_low <= rsi <= rsi_high
     gate_momentum = macd_hist is not None and macd_hist > 0
+    if vol_sma_20 is None or volume is None or vol_sma_20 == 0:
+        gate_volume = True
+    else:
+        gate_volume = volume >= VOLUME_CONFIRM_MULTIPLIER * vol_sma_20
 
     buy_reasons  = []
     bonus_points = 0
@@ -104,8 +116,11 @@ def _evaluate(row: dict, prev_row: Optional[dict] = None, symbol: str = "") -> t
         buy_reasons.append(f"RSI {rsi:.1f} in entry zone [{rsi_low}–{rsi_high}]")
     if gate_momentum:
         buy_reasons.append(f"MACD hist {macd_hist:.3f} > 0 (positive momentum)")
+    if gate_volume and vol_sma_20:
+        ratio = volume / vol_sma_20
+        buy_reasons.append(f"volume {ratio:.2f}× 20-day avg (≥ {VOLUME_CONFIRM_MULTIPLIER}×)")
 
-    if gate_regime and gate_rsi and gate_momentum:
+    if gate_regime and gate_rsi and gate_momentum and gate_volume:
         # Bonus conditions — each adds +1 to strength
         if ema_50 is not None and price > ema_50:
             bonus_points += 1
@@ -123,7 +138,7 @@ def _evaluate(row: dict, prev_row: Optional[dict] = None, symbol: str = "") -> t
             bonus_points += 1
             buy_reasons.append("OBV slope positive (accumulation)")
 
-        strength   = min(10, 3 + bonus_points * 2)   # 3 base for meeting all gates, +2 per bonus
+        strength   = min(10, 4 + bonus_points * 2)   # 4 base for meeting all required gates, +2 per bonus
         tech_score = min(100.0, 50.0 + strength * 5)
         return "BUY", strength, buy_reasons, tech_score
 
@@ -138,6 +153,9 @@ def _evaluate(row: dict, prev_row: Optional[dict] = None, symbol: str = "") -> t
     if not gate_momentum:
         macd_str = f"{macd_hist:.3f}" if macd_hist is not None else "n/a"
         neutral_reasons.append(f"MACD hist {macd_str} ≤ 0")
+    if not gate_volume and vol_sma_20:
+        ratio = volume / vol_sma_20 if volume else 0.0
+        neutral_reasons.append(f"volume {ratio:.2f}× < {VOLUME_CONFIRM_MULTIPLIER}× 20d avg (weak participation)")
 
     # Partial bullishness → score above 50 if regime is ok
     partial_score = 50.0
@@ -147,6 +165,8 @@ def _evaluate(row: dict, prev_row: Optional[dict] = None, symbol: str = "") -> t
         partial_score += 5
     if gate_momentum:
         partial_score += 5
+    if gate_volume:
+        partial_score += 3
 
     return "NEUTRAL", 0, neutral_reasons, partial_score
 

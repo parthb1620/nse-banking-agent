@@ -28,7 +28,12 @@ from loguru import logger
 
 from analysis.technical.indicators import get_indicators
 from backtesting.strategies.ema_rsi_swing import generate_signals
-from config.settings import ATR_STOP_MULTIPLIER, BANKING_STOCKS, RISK_PER_TRADE_PCT
+from config.settings import (
+    ATR_STOP_MULTIPLIER, BANKING_STOCKS, RISK_PER_TRADE_PCT,
+    PARTIAL_PROFIT_PCT, PARTIAL_PROFIT_RR,
+    SWING_LOW_BUFFER_ATR,
+    TRAILING_BREAKEVEN_RR, TRAILING_EMA_RR,
+)
 
 ROUND_TRIP_COST = 0.004        # 0.40%
 HALF_COST       = ROUND_TRIP_COST / 2
@@ -52,6 +57,9 @@ class Trade:
     cost:        float
     net_pnl:     float
     pnl_pct:     float    # net P&L as % of invested capital
+    partial_qty:        int   = 0
+    partial_exit_price: float = 0.0
+    partial_pnl:        float = 0.0
 
 
 @dataclass
@@ -135,12 +143,16 @@ class BacktestEngine:
         trades     = []
         equity_pts = {}
 
-        in_trade   = False
-        entry_price = stop = target = None
-        quantity    = 0
-        entry_date  = None
-        exit_queued = False    # True when EOD exit signal → exit at next open
+        in_trade      = False
+        entry_price   = stop = target = None
+        original_risk = 0.0    # risk per share at entry (for trailing stop + partial calc)
+        quantity      = 0
+        entry_date    = None
+        exit_queued   = False
         exit_reason_q = ""
+        partial_qty        = 0      # shares booked at PARTIAL_PROFIT_RR
+        partial_exit_price = 0.0
+        partial_pnl        = 0.0
 
         for i in range(len(df)):
             bar  = df.iloc[i]
@@ -149,7 +161,12 @@ class BacktestEngine:
             # ── Daily mark-to-market ───────────────────────────────────────────
             close_px = _get(bar, "adjusted_close") or _get(bar, "close") or 0.0
             if in_trade:
-                equity_pts[bdate] = capital - entry_price * quantity * (1 + HALF_COST) + quantity * close_px
+                remaining_qty = quantity - partial_qty
+                equity_pts[bdate] = (
+                    capital + partial_pnl
+                    + remaining_qty * (close_px - entry_price)
+                    - entry_price * quantity * HALF_COST
+                )
             else:
                 equity_pts[bdate] = capital
 
@@ -159,9 +176,11 @@ class BacktestEngine:
                 trade, capital = self._close_trade(
                     symbol, entry_date, entry_price, bdate, open_px,
                     quantity, stop, target, exit_reason_q, capital,
+                    partial_qty=partial_qty, partial_exit_price=partial_exit_price, partial_pnl=partial_pnl,
                 )
                 trades.append(trade)
                 in_trade = exit_queued = False
+                partial_qty = 0; partial_exit_price = 0.0; partial_pnl = 0.0
                 equity_pts[bdate] = capital
                 continue   # skip signal checking on this bar
 
@@ -176,11 +195,21 @@ class BacktestEngine:
                         if not atr_val or math.isnan(atr_val) or atr_val <= 0:
                             continue   # no ATR data — skip this signal
 
-                        risk_per_share = ATR_STOP_MULTIPLIER * atr_val
-                        stop   = open_px - risk_per_share
+                        # Stop: structural (just below swing low) clamped to [0.5×ATR, 2×ATR].
+                        # Clamping protects against very-tight noise pings AND inflated-ATR cases.
+                        floor_stop    = open_px - ATR_STOP_MULTIPLIER * atr_val
+                        ceiling_stop  = open_px - 0.5 * atr_val
+                        swing_low_val = _get(prev, "swing_low_10")
+                        if swing_low_val and not math.isnan(swing_low_val):
+                            raw = swing_low_val - SWING_LOW_BUFFER_ATR * atr_val
+                            stop = max(floor_stop, min(raw, ceiling_stop))
+                        else:
+                            stop = floor_stop
+
+                        risk_per_share = open_px - stop
                         target = open_px + 2.0 * risk_per_share
 
-                        if stop <= 0:
+                        if stop <= 0 or risk_per_share <= 0:
                             continue
 
                         # Position sizing
@@ -190,17 +219,45 @@ class BacktestEngine:
                         if qty < 1:
                             continue
 
-                        entry_price = open_px
-                        entry_date  = bdate
-                        quantity    = qty
-                        in_trade    = True
-                        # Update equity after purchase
+                        entry_price   = open_px
+                        entry_date    = bdate
+                        quantity      = qty
+                        original_risk = risk_per_share
+                        in_trade      = True
+                        partial_qty        = 0
+                        partial_exit_price = 0.0
+                        partial_pnl        = 0.0
                         equity_pts[bdate] = capital - entry_price * quantity * HALF_COST + quantity * close_px
 
             if in_trade:
                 low_px  = _get(bar, "low")
                 high_px = _get(bar, "high")
                 open_px = _get(bar, "open") or close_px
+
+                # ── Partial profit booking at PARTIAL_PROFIT_RR × original_risk ───
+                # Books PARTIAL_PROFIT_PCT of qty when high reaches the level. Capital
+                # accumulates the partial_pnl only at final close (kept here so MTM stays consistent).
+                if (partial_qty == 0 and high_px is not None and original_risk > 0
+                        and high_px >= entry_price + PARTIAL_PROFIT_RR * original_risk):
+                    booked = max(1, int(quantity * PARTIAL_PROFIT_PCT))
+                    if booked < quantity:
+                        partial_exit_price = entry_price + PARTIAL_PROFIT_RR * original_risk
+                        partial_qty = booked
+                        gross_p     = (partial_exit_price - entry_price) * partial_qty
+                        cost_p      = entry_price * partial_qty * ROUND_TRIP_COST
+                        partial_pnl = round(gross_p - cost_p, 2)
+
+                # ── Trailing stop update ───────────────────────────────────────
+                if high_px is not None and original_risk > 0:
+                    ema21_px = _get(bar, "ema_21")
+                    if high_px >= entry_price + TRAILING_EMA_RR * original_risk:
+                        if ema21_px and not math.isnan(ema21_px) and ema21_px > entry_price:
+                            candidate = ema21_px - 0.3 * original_risk
+                        else:
+                            candidate = entry_price
+                        stop = max(stop, round(candidate, 4))
+                    elif high_px >= entry_price + TRAILING_BREAKEVEN_RR * original_risk:
+                        stop = max(stop, entry_price)
 
                 stop_hit   = low_px  is not None and low_px  <= stop
                 target_hit = high_px is not None and high_px >= target
@@ -210,9 +267,11 @@ class BacktestEngine:
                     trade, capital = self._close_trade(
                         symbol, entry_date, entry_price, bdate,
                         stop, quantity, stop, target, "stop_first", capital,
+                        partial_qty=partial_qty, partial_exit_price=partial_exit_price, partial_pnl=partial_pnl,
                     )
                     trades.append(trade)
                     in_trade = False
+                    partial_qty = 0; partial_exit_price = 0.0; partial_pnl = 0.0
                     equity_pts[bdate] = capital
 
                 elif stop_hit:
@@ -221,32 +280,50 @@ class BacktestEngine:
                     trade, capital = self._close_trade(
                         symbol, entry_date, entry_price, bdate,
                         exit_px, quantity, stop, target, "stop", capital,
+                        partial_qty=partial_qty, partial_exit_price=partial_exit_price, partial_pnl=partial_pnl,
                     )
                     trades.append(trade)
                     in_trade = False
+                    partial_qty = 0; partial_exit_price = 0.0; partial_pnl = 0.0
                     equity_pts[bdate] = capital
 
                 elif target_hit:
                     trade, capital = self._close_trade(
                         symbol, entry_date, entry_price, bdate,
                         target, quantity, stop, target, "target", capital,
+                        partial_qty=partial_qty, partial_exit_price=partial_exit_price, partial_pnl=partial_pnl,
                     )
                     trades.append(trade)
                     in_trade = False
+                    partial_qty = 0; partial_exit_price = 0.0; partial_pnl = 0.0
                     equity_pts[bdate] = capital
 
                 else:
                     # Check EOD exit signal
-                    rsi   = _get(bar, "rsi")
-                    ema21 = _get(bar, "ema_21")
+                    rsi    = _get(bar, "rsi")
+                    ema21  = _get(bar, "ema_21")
+                    macd_h = _get(bar, "macd_hist")
 
                     if rsi is not None and not math.isnan(rsi) and rsi > 75:
                         exit_queued = True
                         exit_reason_q = "rsi_exit"
                     elif (ema21 is not None and not math.isnan(ema21)
                           and close_px is not None and close_px < ema21):
-                        exit_queued = True
-                        exit_reason_q = "ema21_exit"
+                        # Soften: a single dip below EMA_21 is noise. Confirm with either
+                        # yesterday also closing below, OR MACD histogram already negative.
+                        prev_below = False
+                        if i > 0:
+                            prev_bar  = df.iloc[i - 1]
+                            prev_close = _get(prev_bar, "adjusted_close") or _get(prev_bar, "close")
+                            prev_e21   = _get(prev_bar, "ema_21")
+                            prev_below = (
+                                prev_close is not None and prev_e21 is not None
+                                and not math.isnan(prev_e21) and prev_close < prev_e21
+                            )
+                        macd_neg = (macd_h is not None and not math.isnan(macd_h) and macd_h < 0)
+                        if prev_below or macd_neg:
+                            exit_queued = True
+                            exit_reason_q = "ema21_exit"
 
         # ── Force-close any open position at end of data ──────────────────────
         if in_trade:
@@ -256,6 +333,7 @@ class BacktestEngine:
             trade, capital = self._close_trade(
                 symbol, entry_date, entry_price, last_date,
                 last_close, quantity, stop, target, "end_of_data", capital,
+                partial_qty=partial_qty, partial_exit_price=partial_exit_price, partial_pnl=partial_pnl,
             )
             trades.append(trade)
             equity_pts[last_date] = capital
@@ -273,12 +351,24 @@ class BacktestEngine:
     def _close_trade(
         symbol, entry_date, entry_price, exit_date, exit_price,
         quantity, stop, target, reason, capital,
+        partial_qty: int = 0, partial_exit_price: float = 0.0, partial_pnl: float = 0.0,
     ) -> tuple[Trade, float]:
-        """Compute P&L, deduct costs, return Trade and updated capital."""
-        entry_cost = entry_price * quantity * HALF_COST
-        exit_cost  = exit_price  * quantity * HALF_COST
-        gross_pnl  = (exit_price - entry_price) * quantity
-        net_pnl    = gross_pnl - entry_cost - exit_cost
+        """
+        Compute P&L for the remaining (un-booked) quantity, add the previously
+        booked partial_pnl, and return the combined Trade plus updated capital.
+        """
+        remaining_qty = max(0, quantity - partial_qty)
+        entry_cost = entry_price * remaining_qty * HALF_COST
+        exit_cost  = exit_price  * remaining_qty * HALF_COST
+        gross_remaining = (exit_price - entry_price) * remaining_qty
+        net_remaining   = gross_remaining - entry_cost - exit_cost
+
+        # Combined gross/cost across both legs (partial + final).
+        gross_partial = (partial_exit_price - entry_price) * partial_qty
+        cost_partial  = entry_price * partial_qty * ROUND_TRIP_COST
+        total_gross   = gross_remaining + gross_partial
+        total_cost    = entry_cost + exit_cost + cost_partial
+        total_net     = net_remaining + partial_pnl
 
         trade = Trade(
             symbol=symbol,
@@ -290,12 +380,15 @@ class BacktestEngine:
             stop_loss=round(stop, 4),
             target=round(target, 4),
             exit_reason=reason,
-            gross_pnl=round(gross_pnl, 2),
-            cost=round(entry_cost + exit_cost, 2),
-            net_pnl=round(net_pnl, 2),
-            pnl_pct=round(net_pnl / (entry_price * quantity) * 100, 3),
+            gross_pnl=round(total_gross, 2),
+            cost=round(total_cost, 2),
+            net_pnl=round(total_net, 2),
+            pnl_pct=round(total_net / (entry_price * quantity) * 100, 3) if quantity else 0.0,
+            partial_qty=partial_qty,
+            partial_exit_price=round(partial_exit_price, 4),
+            partial_pnl=round(partial_pnl, 2),
         )
-        return trade, capital + net_pnl
+        return trade, capital + total_net
 
 
 # ── Utility ────────────────────────────────────────────────────────────────────

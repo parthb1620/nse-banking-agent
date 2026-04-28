@@ -83,6 +83,17 @@ MAX_OPEN_POSITIONS     = 3      # max simultaneous positions (one sector concent
 MIN_RISK_REWARD        = 2.0    # minimum 1:2 R:R before entering a trade
 ATR_STOP_MULTIPLIER    = 2.0    # stop_loss = entry - (ATR_STOP_MULTIPLIER × ATR_14)
 DAILY_LOSS_LIMIT_PCT   = 0.03   # pause new trades if portfolio drops 3% in one day
+MIN_SIGNAL_STRENGTH    = 6      # only trade BUY signals with strength >= this (4 required gates + ≥1 bonus)
+FII_SELL_STREAK_DAYS   = 3      # skip new entries if FII net sellers for this many consecutive days
+TRAILING_BREAKEVEN_RR  = 1.0    # move stop to breakeven when trade reaches 1:1 R
+TRAILING_EMA_RR        = 1.5    # trail stop at EMA_21 when trade reaches 1.5:1 R
+
+VOLUME_CONFIRM_MULTIPLIER = 1.2  # entry day volume must be ≥ this × 20-day average (filters weak-hand reversals)
+SWING_LOW_LOOKBACK     = 10     # bars to look back for structural swing low (stop placement)
+SWING_LOW_BUFFER_ATR   = 0.3    # extra buffer below swing low, expressed in ATR units
+
+PARTIAL_PROFIT_RR      = 1.0    # book PARTIAL_PROFIT_PCT of position when price hits this R multiple
+PARTIAL_PROFIT_PCT     = 0.5    # fraction of qty to book at PARTIAL_PROFIT_RR (0.5 = half)
 
 # ── Backtesting ────────────────────────────────────────────────────────────────
 # 0.40% total round-trip cost: brokerage 0.06% + STT 0.20% + exchange 0.0067% + GST ~0.012% + slippage 0.10%
