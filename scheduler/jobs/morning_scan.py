@@ -230,7 +230,7 @@ def build_message(
         if llm_insights and sym in llm_insights:
             insight = llm_insights[sym]
             if insight.get("thesis"):
-                lines.append(f"  📝 {insight['thesis'][:280]}")
+                lines.append(f"  📝 {insight['thesis']}")
             if insight.get("risk"):
                 lines.append(f"  ⚠️ Risk: {insight['risk']}")
 

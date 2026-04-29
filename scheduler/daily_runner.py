@@ -3,14 +3,16 @@ APScheduler orchestrator — daily data collection + alert pipeline.
 
 Jobs:
   08:30 IST — morning_scan: news sentiment + top picks Telegram alert
+  14:45–15:25 IST — intraday_monitor: late-session recovery detector (every 5 min)
   16:15 IST — eod_collection: Bhavcopy + quality + fundamentals/news
   16:15 IST — eod_report: updated scores + signal Telegram alert
 
 Run from project root:
-  python -m scheduler.daily_runner          # start scheduler (blocking)
-  python -m scheduler.daily_runner once     # run EOD collection once now
-  python -m scheduler.daily_runner morning  # run morning scan once now
-  python -m scheduler.daily_runner eod      # run EOD report once now
+  python -m scheduler.daily_runner            # start scheduler (blocking)
+  python -m scheduler.daily_runner once       # run EOD collection once now
+  python -m scheduler.daily_runner morning    # run morning scan once now
+  python -m scheduler.daily_runner eod        # run EOD report once now
+  python -m scheduler.daily_runner intraday   # run intraday monitor once now
 """
 
 import sys
@@ -137,6 +139,12 @@ def paper_trading_exit_job() -> None:
     run()
 
 
+def intraday_monitor_job() -> None:
+    """14:45–15:25 IST (every 5 min) — late-session recovery detector."""
+    from scheduler.jobs.intraday_monitor import run
+    run()
+
+
 def eod_report_job() -> None:
     """16:15 IST — updated scores + signals Telegram alert."""
     from scheduler.jobs.eod_report import run
@@ -226,6 +234,18 @@ def start_scheduler() -> None:
         misfire_grace_time=300,
     )
 
+    # Intraday monitor — every 5 min from 14:45 to 15:25 IST
+    scheduler.add_job(
+        intraday_monitor_job,
+        trigger="cron",
+        day_of_week="mon-fri",
+        hour="14-15",
+        minute="45,50,55,0,5,10,15,20,25",
+        id="intraday_monitor",
+        name="Intraday late-session recovery detector",
+        misfire_grace_time=60,
+    )
+
     # Walk-forward optimizer on 1st of each month at 07:00 IST (before market open)
     scheduler.add_job(
         monthly_optimize_job,
@@ -262,5 +282,7 @@ if __name__ == "__main__":
         paper_trading_exit_job()
     elif cmd == "optimize":
         monthly_optimize_job()
+    elif cmd == "intraday":
+        intraday_monitor_job()
     else:
         start_scheduler()
