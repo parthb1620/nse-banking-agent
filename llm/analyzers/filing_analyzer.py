@@ -1,5 +1,5 @@
 """
-NSE filing analyser — uses Gemma3 via Ollama.
+NSE filing analyser — uses Gemma4:e4b via Ollama.
 
 Analyses corporate filings (earnings results, board decisions, SEBI orders, etc.)
 and returns a structured summary:
@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 from pydantic import BaseModel, Field, field_validator
 
-from config.settings import OLLAMA_MODEL
+from config.settings import OLLAMA_MODEL_PARSER
 from data.storage.database import CorporateFiling, LLMLog, get_session
 from llm.ollama_client import generate_validated
 
@@ -142,7 +142,7 @@ def analyse_filing(filing: CorporateFiling) -> Optional[FilingResponse]:
         return None
 
     prompt = _build_prompt(filing)
-    return generate_validated(prompt, FilingResponse)
+    return generate_validated(prompt, FilingResponse, model=OLLAMA_MODEL_PARSER)
 
 
 def process_filing(filing: CorporateFiling) -> bool:
@@ -152,7 +152,7 @@ def process_filing(filing: CorporateFiling) -> bool:
     """
     prompt  = _build_prompt(filing)
     p_hash  = _prompt_hash(prompt)
-    result  = generate_validated(prompt, FilingResponse)
+    result  = generate_validated(prompt, FilingResponse, model=OLLAMA_MODEL_PARSER)
 
     if result is None:
         logger.warning(f"filing_analyzer: failed for filing id={filing.id}")
@@ -164,7 +164,7 @@ def process_filing(filing: CorporateFiling) -> bool:
         log_entry = LLMLog(
             symbol        = filing.symbol,
             date          = now.date(),
-            model         = OLLAMA_MODEL,
+            model         = OLLAMA_MODEL_PARSER,
             prompt_hash   = p_hash,
             response_json = str({
                 "classification": result.classification,

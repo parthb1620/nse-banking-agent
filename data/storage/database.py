@@ -275,6 +275,30 @@ class LLMLog(Base):
     __table_args__ = (sa.Index("ix_llm_log_symbol_date", "symbol", "date"),)
 
 
+class TextEmbedding(Base):
+    """
+    Embedding vectors produced by nomic-embed-text.
+    source_type: 'news' | 'filing'
+    source_id: FK to news_articles.id or corporate_filings.id
+    vector_json: JSON-serialised list[float] (nomic-embed-text = 768 dims)
+    """
+    __tablename__ = "text_embeddings"
+
+    id:          Mapped[int]            = mapped_column(sa.Integer, primary_key=True, autoincrement=True)
+    symbol:      Mapped[str]            = mapped_column(sa.String(20), nullable=False)
+    source_type: Mapped[str]            = mapped_column(sa.String(10), nullable=False)  # 'news' | 'filing'
+    source_id:   Mapped[int]            = mapped_column(sa.Integer, nullable=False)
+    text_hash:   Mapped[Optional[str]]  = mapped_column(sa.String(16))   # first 16 chars of SHA-256 of input text
+    vector_json: Mapped[Optional[str]]  = mapped_column(sa.Text)         # JSON float array
+    model:       Mapped[Optional[str]]  = mapped_column(sa.String(50))
+    created_at:  Mapped[Optional[datetime]] = mapped_column(sa.DateTime)
+
+    __table_args__ = (
+        sa.UniqueConstraint("source_type", "source_id", name="uq_embedding_source"),
+        sa.Index("ix_embeddings_symbol", "symbol"),
+    )
+
+
 class DataQualityLog(Base):
     """
     Daily data quality report per stock produced by data/quality/candle_checks.py.

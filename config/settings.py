@@ -22,10 +22,18 @@ GROWW_BASE_URL   = "https://api.groww.in"
 
 # ── Ollama / LLM ───────────────────────────────────────────────────────────────
 OLLAMA_BASE_URL  = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL     = os.getenv("OLLAMA_MODEL", "gemma3")
-LLM_TEMPERATURE  = 0.1
-LLM_TOP_P        = 0.9
-LLM_NUM_PREDICT  = 500
+OLLAMA_MODEL     = os.getenv("OLLAMA_MODEL", "gemma3")   # legacy fallback
+
+# Multi-model pipeline (all served by local Ollama)
+OLLAMA_MODEL_PARSER      = os.getenv("OLLAMA_MODEL_PARSER",      "gemma4:e4b")       # fast JSON parsing + synthesis
+OLLAMA_MODEL_SYNTHESIZER = os.getenv("OLLAMA_MODEL_SYNTHESIZER", "gemma4:e4b")       # trade thesis writing
+OLLAMA_MODEL_RISK        = os.getenv("OLLAMA_MODEL_RISK",        "deepseek-r1:8b")   # contrarian risk manager
+OLLAMA_MODEL_EMBED       = os.getenv("OLLAMA_MODEL_EMBED",       "nomic-embed-text") # semantic embeddings
+
+LLM_TEMPERATURE      = 0.1
+LLM_TOP_P            = 0.9
+LLM_NUM_PREDICT      = 800    # bumped from 500 — Gemma4 is more verbose than Gemma3
+LLM_RISK_NUM_PREDICT = 1200   # deepseek-r1 needs more tokens for chain-of-thought
 
 # ── Telegram ───────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")

@@ -1,5 +1,5 @@
 """
-News sentiment analyser — uses Gemma3 via Ollama.
+News sentiment analyser — uses Gemma4:e4b via Ollama.
 
 For each news article:
   1. Send headline + content snippet to Gemma3
@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 from pydantic import BaseModel, Field, field_validator
 
-from config.settings import BANKING_STOCKS, OLLAMA_MODEL
+from config.settings import BANKING_STOCKS, OLLAMA_MODEL_PARSER
 from data.storage.database import LLMLog, NewsArticle, get_session
 from llm.ollama_client import generate_validated
 
@@ -124,7 +124,7 @@ def analyse_article(article: NewsArticle, stock_name: str = "") -> Optional[Sent
         return None
 
     prompt = _build_prompt(article, stock_name)
-    result = generate_validated(prompt, SentimentResponse)
+    result = generate_validated(prompt, SentimentResponse, model=OLLAMA_MODEL_PARSER)
     return result
 
 
@@ -142,7 +142,7 @@ def process_article(article: NewsArticle, stock_name: str = "") -> bool:
     """
     prompt   = _build_prompt(article, stock_name)
     p_hash   = _prompt_hash(prompt)
-    result   = generate_validated(prompt, SentimentResponse)
+    result   = generate_validated(prompt, SentimentResponse, model=OLLAMA_MODEL_PARSER)
 
     if result is None:
         logger.warning(f"news_sentiment: analysis failed for article id={article.id}")
@@ -161,7 +161,7 @@ def process_article(article: NewsArticle, stock_name: str = "") -> bool:
         log_entry = LLMLog(
             symbol      = article.symbol,
             date        = now.date(),
-            model       = OLLAMA_MODEL,
+            model       = OLLAMA_MODEL_PARSER,
             prompt_hash = p_hash,
             response_json = str({
                 "sentiment_score": result.sentiment_score,

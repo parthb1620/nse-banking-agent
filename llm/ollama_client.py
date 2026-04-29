@@ -19,16 +19,24 @@ import re
 import time
 from typing import Optional, Type, TypeVar
 
+
+def _strip_thinking(text: str) -> str:
+    """Strip DeepSeek R1 <think>...</think> chain-of-thought blocks."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
 import requests
 from loguru import logger
 from pydantic import BaseModel, ValidationError
 
 from config.settings import (
-    LLM_NUM_PREDICT, LLM_TEMPERATURE, LLM_TOP_P, OLLAMA_BASE_URL, OLLAMA_MODEL,
+    LLM_NUM_PREDICT, LLM_RISK_NUM_PREDICT, LLM_TEMPERATURE, LLM_TOP_P,
+    OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_MODEL_EMBED,
 )
 
 _GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
+_EMBED_URL    = f"{OLLAMA_BASE_URL}/api/embeddings"
 _TIMEOUT      = 60          # seconds per request
+_EMBED_TIMEOUT = 30
 _MAX_RETRIES  = 3
 _RETRY_DELAY  = 2           # seconds, doubled each attempt
 
@@ -37,7 +45,27 @@ T = TypeVar("T", bound=BaseModel)
 
 # ── Core generate ──────────────────────────────────────────────────────────────
 
-def generate(prompt: str, model: str = OLLAMA_MODEL) -> str:
+def embed(text: str, model: str = OLLAMA_MODEL_EMBED) -> list[float]:
+    """
+    Return an embedding vector for text using nomic-embed-text (or another embed model).
+    Raises RuntimeError if Ollama is unreachable after retries.
+    """
+    payload = {"model": model, "prompt": text}
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            resp = requests.post(_EMBED_URL, json=payload, timeout=_EMBED_TIMEOUT)
+            resp.raise_for_status()
+            return resp.json()["embedding"]
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(f"Ollama embed attempt {attempt}/{_MAX_RETRIES} failed: {exc}")
+            if attempt < _MAX_RETRIES:
+                time.sleep(_RETRY_DELAY * (2 ** (attempt - 1)))
+    raise RuntimeError(f"Ollama embed unavailable after {_MAX_RETRIES} attempts: {last_exc}")
+
+
+def generate(prompt: str, model: str = OLLAMA_MODEL, num_predict: int = LLM_NUM_PREDICT) -> str:
     """
     Send a prompt to Ollama and return the full response text.
     Retries up to _MAX_RETRIES times on transient errors.
@@ -50,7 +78,7 @@ def generate(prompt: str, model: str = OLLAMA_MODEL) -> str:
         "options": {
             "temperature":  LLM_TEMPERATURE,
             "top_p":        LLM_TOP_P,
-            "num_predict":  LLM_NUM_PREDICT,
+            "num_predict":  num_predict,
         },
     }
 
@@ -73,20 +101,53 @@ def generate(prompt: str, model: str = OLLAMA_MODEL) -> str:
     raise RuntimeError(f"Ollama unavailable after {_MAX_RETRIES} attempts: {last_exc}")
 
 
-def generate_json(prompt: str, model: str = OLLAMA_MODEL) -> dict:
-    """
-    Call Ollama and extract a JSON object from the response.
-    Tries json_mode first; falls back to regex extraction from free text.
-    Returns empty dict if no valid JSON found.
-    """
-    # Instruct the model explicitly to return only JSON
-    json_prompt = (
-        f"{prompt}\n\n"
-        "IMPORTANT: Respond with ONLY a valid JSON object. "
-        "No explanation, no markdown, no code fences. Just the raw JSON."
-    )
+def _generate_json_mode(prompt: str, model: str, num_predict: int) -> str:
+    """Call Ollama with format='json' to force structured output with no preamble."""
+    payload = {
+        "model":  model,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+        "options": {
+            "temperature": LLM_TEMPERATURE,
+            "top_p":       LLM_TOP_P,
+            "num_predict": num_predict,
+        },
+    }
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            resp = requests.post(_GENERATE_URL, json=payload, timeout=_TIMEOUT)
+            resp.raise_for_status()
+            text = resp.json().get("response", "").strip()
+            if not text:
+                raise ValueError("Empty response from Ollama (json mode)")
+            return text
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(f"Ollama json-mode attempt {attempt}/{_MAX_RETRIES} failed: {exc}")
+            if attempt < _MAX_RETRIES:
+                time.sleep(_RETRY_DELAY * (2 ** (attempt - 1)))
+    raise RuntimeError(f"Ollama json-mode unavailable: {last_exc}")
 
-    text = generate(json_prompt, model)
+
+def generate_json(prompt: str, model: str = OLLAMA_MODEL, num_predict: int = LLM_NUM_PREDICT) -> dict:
+    """
+    Call Ollama with format='json' (native structured output) and parse the result.
+    Falls back to regex extraction if the response still isn't valid JSON.
+    Returns empty dict on failure.
+    """
+    # Use native JSON mode — model outputs only JSON, no preamble
+    try:
+        text = _strip_thinking(_generate_json_mode(prompt, model, num_predict))
+    except RuntimeError:
+        # If json-mode call itself fails, fall back to free-text generate
+        json_prompt = (
+            f"{prompt}\n\n"
+            "IMPORTANT: Respond with ONLY a valid JSON object. "
+            "No explanation, no markdown, no code fences. Just the raw JSON."
+        )
+        text = _strip_thinking(generate(json_prompt, model, num_predict=num_predict))
 
     # Attempt 1: entire response is JSON
     try:
@@ -94,15 +155,15 @@ def generate_json(prompt: str, model: str = OLLAMA_MODEL) -> dict:
     except json.JSONDecodeError:
         pass
 
-    # Attempt 2: extract first {...} block
-    match = re.search(r"\{.*?\}", text, re.DOTALL)
+    # Attempt 2: greedy — grab from first '{' to last '}' (outermost JSON object)
+    match = re.search(r"\{.*\}", text, re.DOTALL)
     if match:
         try:
             return json.loads(match.group())
         except json.JSONDecodeError:
             pass
 
-    # Attempt 3: extract largest {...} block (handles nested keys)
+    # Attempt 3: largest balanced {...} block (handles text surrounding JSON)
     matches = re.findall(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\}", text, re.DOTALL)
     for m in sorted(matches, key=len, reverse=True):
         try:
@@ -118,12 +179,13 @@ def generate_validated(
     prompt:       str,
     model_class:  Type[T],
     model:        str = OLLAMA_MODEL,
+    num_predict:  int = LLM_NUM_PREDICT,
 ) -> Optional[T]:
     """
     Call Ollama, extract JSON, validate against a Pydantic model.
     Returns a validated Pydantic instance or None on failure.
     """
-    raw = generate_json(prompt, model)
+    raw = generate_json(prompt, model, num_predict=num_predict)
     if not raw:
         return None
     try:
