@@ -1,18 +1,28 @@
 """
 APScheduler orchestrator — daily data collection + alert pipeline.
 
-Jobs:
-  08:30 IST — morning_scan: news sentiment + top picks Telegram alert
-  14:45–15:25 IST — intraday_monitor: late-session recovery detector (every 5 min)
-  16:15 IST — eod_collection: Bhavcopy + quality + fundamentals/news
-  16:15 IST — eod_report: updated scores + signal Telegram alert
+Jobs (all times IST):
+  Sun 08:00           — long_term_scan:  weekly fundamentals-first picks (60 stocks)
+  Mon–Fri 08:30       — morning_scan:    [SHORT] news + sentiment + top picks
+  Mon–Fri 09:20       — paper_entry:     paper trade entries (shortterm engine)
+  Mon–Fri 09:20–15:25 — breakout_monitor: full-day breakout/breakdown (every 5 min)
+  Mon–Fri 14:30       — btst_scan:       [BTST] overnight pick alert
+  Mon–Fri 14:40       — intraday_prefetch: refresh news before intraday
+  Mon–Fri 14:45–15:25 — intraday_monitor: late-session recovery detector
+  Mon–Fri 15:35       — paper_exit:      paper trade exit check
+  Mon–Fri 16:15       — eod_collection:  Bhavcopy + quality + fundamentals
+  Mon–Fri 16:17       — eod_report:      [SHORT] EOD scores + signals
+  1st of month 07:00  — monthly_optimize: walk-forward RSI/ATR optimiser
 
 Run from project root:
-  python -m scheduler.daily_runner            # start scheduler (blocking)
-  python -m scheduler.daily_runner once       # run EOD collection once now
-  python -m scheduler.daily_runner morning    # run morning scan once now
-  python -m scheduler.daily_runner eod        # run EOD report once now
-  python -m scheduler.daily_runner intraday   # run intraday monitor once now
+  python -m scheduler.daily_runner             # start scheduler (blocking)
+  python -m scheduler.daily_runner once        # run EOD collection once
+  python -m scheduler.daily_runner morning     # run morning scan once
+  python -m scheduler.daily_runner eod         # run EOD report once
+  python -m scheduler.daily_runner btst        # run BTST scan once
+  python -m scheduler.daily_runner longterm    # run long-term weekly scan once
+  python -m scheduler.daily_runner intraday    # run intraday monitor once
+  python -m scheduler.daily_runner breakout    # run breakout monitor once
 """
 
 import sys
@@ -22,7 +32,10 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from loguru import logger
 
 from config.nse_calendar import is_trading_day
-from config.settings import EOD_REPORT_TIME, MORNING_SCAN_TIME, LOG_LEVEL, LOG_DIR, SCHEDULER_TIMEZONE
+from config.settings import (
+    BTST_SCAN_TIME, EOD_REPORT_TIME, LONGTERM_SCAN_TIME,
+    MORNING_SCAN_TIME, LOG_LEVEL, LOG_DIR, SCHEDULER_TIMEZONE,
+)
 
 # ── Logging setup ──────────────────────────────────────────────────────────────
 logger.remove()
@@ -66,9 +79,9 @@ def eod_collection_job() -> None:
     try:
         from datetime import timedelta
         from data.collectors.groww_client import fetch_historical, store_historical
-        from config.settings import BANKING_STOCKS
+        from config.settings import ALL_STOCKS
         gap_start = today - timedelta(days=5)
-        for symbol in BANKING_STOCKS:
+        for symbol in ALL_STOCKS:
             rows = fetch_historical(symbol, gap_start, today)
             if rows:
                 store_historical(symbol, rows)
@@ -139,6 +152,31 @@ def paper_trading_exit_job() -> None:
     run()
 
 
+def intraday_prefetch_job() -> None:
+    """14:40 IST — refresh news + filings just before intraday monitor starts."""
+    today = date.today()
+    if not is_trading_day(today):
+        return
+    logger.info("=== Intraday pre-fetch: news + filings ===")
+    try:
+        from data.collectors.news_collector import run_all as run_news
+        run_news()
+    except Exception as exc:
+        logger.warning(f"Intraday pre-fetch: news failed — {exc}")
+    try:
+        from data.collectors.nse_filings import run_all as run_filings
+        run_filings(days_back=1)
+    except Exception as exc:
+        logger.warning(f"Intraday pre-fetch: filings failed — {exc}")
+    logger.info("=== Intraday pre-fetch complete ===")
+
+
+def breakout_monitor_job() -> None:
+    """09:20–15:25 IST (every 5 min) — full-day breakout/breakdown detector."""
+    from scheduler.jobs.breakout_monitor import run
+    run()
+
+
 def intraday_monitor_job() -> None:
     """14:45–15:25 IST (every 5 min) — late-session recovery detector."""
     from scheduler.jobs.intraday_monitor import run
@@ -146,8 +184,20 @@ def intraday_monitor_job() -> None:
 
 
 def eod_report_job() -> None:
-    """16:15 IST — updated scores + signals Telegram alert."""
+    """16:17 IST — updated scores + signals Telegram alert."""
     from scheduler.jobs.eod_report import run
+    run()
+
+
+def btst_scan_job() -> None:
+    """14:30 IST — BTST overnight pick alert."""
+    from scheduler.jobs.btst_scan import run
+    run()
+
+
+def long_term_scan_job() -> None:
+    """Sunday 08:00 IST — weekly long-term fundamentals-first scan."""
+    from scheduler.jobs.long_term_scan import run
     run()
 
 
@@ -184,14 +234,27 @@ def start_scheduler() -> None:
 
     scheduler = BlockingScheduler(timezone=SCHEDULER_TIMEZONE)
 
-    # Morning scan at 08:30 IST
+    # Long-term weekly scan — every Sunday at 08:00 IST
+    lh, lm = LONGTERM_SCAN_TIME.split(":")
+    scheduler.add_job(
+        long_term_scan_job,
+        trigger="cron",
+        day_of_week="sun",
+        hour=int(lh), minute=int(lm),
+        id="long_term_scan",
+        name="[LONG] Weekly fundamentals scan",
+        misfire_grace_time=3600,
+    )
+
+    # Morning scan at 08:30 IST (Mon–Fri)
     mh, mm = MORNING_SCAN_TIME.split(":")
     scheduler.add_job(
         morning_scan_job,
         trigger="cron",
+        day_of_week="mon-fri",
         hour=int(mh), minute=int(mm),
         id="morning_scan",
-        name="Morning scan + alert",
+        name="[SHORT] Morning scan + alert",
         misfire_grace_time=300,
     )
 
@@ -232,6 +295,41 @@ def start_scheduler() -> None:
         id="eod_report",
         name="EOD report + alert",
         misfire_grace_time=300,
+    )
+
+    # BTST scan at 14:30 IST (Mon–Fri) — 45 min before close
+    bh, bm = BTST_SCAN_TIME.split(":")
+    scheduler.add_job(
+        btst_scan_job,
+        trigger="cron",
+        day_of_week="mon-fri",
+        hour=int(bh), minute=int(bm),
+        id="btst_scan",
+        name="[BTST] Overnight pick alert",
+        misfire_grace_time=300,
+    )
+
+    # Pre-fetch news + filings at 14:40 so intraday monitor has fresh data
+    scheduler.add_job(
+        intraday_prefetch_job,
+        trigger="cron",
+        day_of_week="mon-fri",
+        hour=14, minute=40,
+        id="intraday_prefetch",
+        name="Intraday pre-fetch (news + filings)",
+        misfire_grace_time=120,
+    )
+
+    # Breakout monitor — every 5 min from 09:20 to 15:25 IST (full trading day)
+    scheduler.add_job(
+        breakout_monitor_job,
+        trigger="cron",
+        day_of_week="mon-fri",
+        hour="9-15",
+        minute="20,25,30,35,40,45,50,55,0,5,10,15",
+        id="breakout_monitor",
+        name="Full-day breakout/breakdown detector (all sectors)",
+        misfire_grace_time=60,
     )
 
     # Intraday monitor — every 5 min from 14:45 to 15:25 IST
@@ -282,7 +380,13 @@ if __name__ == "__main__":
         paper_trading_exit_job()
     elif cmd == "optimize":
         monthly_optimize_job()
+    elif cmd == "btst":
+        btst_scan_job()
+    elif cmd == "longterm":
+        long_term_scan_job()
     elif cmd == "intraday":
         intraday_monitor_job()
+    elif cmd == "breakout":
+        breakout_monitor_job()
     else:
         start_scheduler()

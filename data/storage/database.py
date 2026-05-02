@@ -203,6 +203,7 @@ class TechnicalSignal(Base):
     BUY / SELL / NEUTRAL signals generated after market close using that day's OHLCV.
     signal_type: 'BUY' | 'SELL' | 'NEUTRAL'
     strength: 1 (weak) – 10 (very strong confluence)
+    engine: 'shortterm' | 'longterm' | 'btst' | 'intraday'
     indicators_json: snapshot of indicator values used (for audit and backtesting)
     """
     __tablename__ = "technical_signals"
@@ -215,8 +216,12 @@ class TechnicalSignal(Base):
     reason:          Mapped[Optional[str]]  = mapped_column(sa.String(500))
     indicators_json: Mapped[Optional[str]]  = mapped_column(sa.Text)
     generated_at:    Mapped[Optional[datetime]] = mapped_column(sa.DateTime)
+    engine:          Mapped[str]            = mapped_column(sa.String(20), default="shortterm", server_default="shortterm")
 
-    __table_args__ = (sa.Index("ix_signals_symbol_date", "symbol", "signal_date"),)
+    __table_args__ = (
+        sa.Index("ix_signals_symbol_date", "symbol", "signal_date"),
+        sa.Index("ix_signals_engine", "engine"),
+    )
 
 
 class PaperTrade(Base):
@@ -250,7 +255,13 @@ class PaperTrade(Base):
     partial_exit_date:  Mapped[Optional[datetime]] = mapped_column(sa.Date)
     partial_pnl:        Mapped[Optional[float]] = mapped_column(sa.Float)
 
-    __table_args__ = (sa.Index("ix_paper_trades_symbol", "symbol"),)
+    # Portfolio name — allows multiple parallel strategies to run side-by-side
+    portfolio_name: Mapped[str] = mapped_column(sa.String(40), default="swing_banking", server_default="swing_banking")
+
+    __table_args__ = (
+        sa.Index("ix_paper_trades_symbol", "symbol"),
+        sa.Index("ix_paper_trades_portfolio", "portfolio_name"),
+    )
 
 
 class LLMLog(Base):
@@ -339,30 +350,33 @@ def _set_sqlite_pragma(dbapi_conn, _):
         cursor.close()
 
 
-def _migrate_paper_trades() -> None:
-    """
-    SQLite-only ALTER TABLE migration: add partial-profit columns to an existing
-    paper_trades table. create_all() does not add new columns, so we patch them in.
-    """
+def _migrate_sqlite() -> None:
+    """SQLite ALTER TABLE migrations — create_all() never adds new columns to existing tables."""
     if not DB_URL.startswith("sqlite"):
         return
-    new_cols = {
-        "partial_qty":        "INTEGER",
-        "partial_exit_price": "REAL",
-        "partial_exit_date":  "DATE",
-        "partial_pnl":        "REAL",
-    }
     with engine.begin() as conn:
-        existing = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(paper_trades)").fetchall()}
-        for col, sql_type in new_cols.items():
-            if col not in existing:
+        # paper_trades — partial-profit columns
+        pt_cols = {
+            "partial_qty":        "INTEGER",
+            "partial_exit_price": "REAL",
+            "partial_exit_date":  "DATE",
+            "partial_pnl":        "REAL",
+        }
+        pt_existing = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(paper_trades)").fetchall()}
+        for col, sql_type in pt_cols.items():
+            if col not in pt_existing:
                 conn.exec_driver_sql(f"ALTER TABLE paper_trades ADD COLUMN {col} {sql_type}")
+
+        # technical_signals — engine column
+        sig_existing = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(technical_signals)").fetchall()}
+        if "engine" not in sig_existing:
+            conn.exec_driver_sql("ALTER TABLE technical_signals ADD COLUMN engine TEXT NOT NULL DEFAULT 'shortterm'")
 
 
 def init_db() -> None:
     """Create all tables if they don't exist. Safe to call on every startup."""
     Base.metadata.create_all(engine)
-    _migrate_paper_trades()
+    _migrate_sqlite()
 
 
 def get_session() -> Session:

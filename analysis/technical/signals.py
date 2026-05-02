@@ -31,7 +31,7 @@ from loguru import logger
 
 from analysis.technical.indicators import get_indicators, get_latest_row
 from config.settings import (
-    ADX_TREND_MIN, BANKING_STOCKS,
+    ADX_TREND_MIN, ALL_STOCKS,
     RSI_ENTRY_HIGH, RSI_ENTRY_LOW, RSI_EXIT,
     VOLUME_CONFIRM_MULTIPLIER,
 )
@@ -238,7 +238,7 @@ def generate_all(signal_date: Optional[date] = None) -> list[TechnicalSignal]:
     """Generate and store signals for all tracked stocks."""
     signal_date = signal_date or date.today()
     results = []
-    for symbol in BANKING_STOCKS:
+    for symbol in ALL_STOCKS:
         sig = generate_signal(symbol, signal_date)
         if sig:
             results.append(sig)

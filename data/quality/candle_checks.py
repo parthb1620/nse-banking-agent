@@ -18,7 +18,7 @@ from loguru import logger
 from sqlalchemy import func, text
 
 from config.nse_calendar import trading_days_between
-from config.settings import BANKING_STOCKS
+from config.settings import ALL_STOCKS
 from data.storage.database import DataQualityLog, OHLCVDaily, get_session
 
 _VOLUME_SPIKE_MULTIPLIER = 10   # flag if volume > 10× 20-day avg
@@ -194,4 +194,4 @@ def run_quality_checks(symbol: str, check_date: date | None = None) -> float:
 
 def run_all(check_date: date | None = None) -> dict[str, float]:
     """Run quality checks for all tracked stocks. Returns {symbol: score}."""
-    return {s: run_quality_checks(s, check_date) for s in BANKING_STOCKS}
+    return {s: run_quality_checks(s, check_date) for s in ALL_STOCKS}

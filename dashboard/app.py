@@ -26,7 +26,7 @@ import streamlit as st
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from config.settings import BANKING_STOCKS, PAPER_TRADING_CAPITAL, STOCK_NAMES
+from config.settings import ALL_STOCKS, BANKING_STOCKS, PAPER_TRADING_CAPITAL, STOCK_NAMES, WATCHLIST
 from data.storage.database import (
     NewsArticle, OHLCVDaily, PaperTrade, TechnicalSignal, get_session, init_db,
 )
@@ -55,7 +55,7 @@ def load_scores() -> list[dict]:
 def load_signals() -> pd.DataFrame:
     rows = []
     with get_session() as session:
-        for sym in BANKING_STOCKS:
+        for sym in ALL_STOCKS:
             sig = (
                 session.query(TechnicalSignal)
                 .filter(TechnicalSignal.symbol == sym)
@@ -122,7 +122,7 @@ def load_news(symbol: str, limit: int = 10) -> pd.DataFrame:
 def load_data_quality() -> pd.DataFrame:
     rows = []
     with get_session() as session:
-        for sym in BANKING_STOCKS:
+        for sym in ALL_STOCKS:
             count = session.query(OHLCVDaily).filter(OHLCVDaily.symbol == sym).count()
             latest = (
                 session.query(OHLCVDaily)
@@ -167,12 +167,18 @@ def sentiment_colour(score) -> str:
 # Sidebar
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.sidebar.title("NSE Banking Agent")
+st.sidebar.title("NSE Multi-Sector Agent")
 st.sidebar.caption(f"As of {datetime.now(_IST).strftime('%d %b %Y %H:%M')} IST")
+
+selected_sector = st.sidebar.selectbox(
+    "Sector filter",
+    ["All"] + list(WATCHLIST.keys()),
+)
+_sector_stocks = ALL_STOCKS if selected_sector == "All" else WATCHLIST[selected_sector]
 
 selected_symbol = st.sidebar.selectbox(
     "Select stock for detail view",
-    BANKING_STOCKS,
+    _sector_stocks,
     format_func=lambda s: f"{s} — {STOCK_NAMES.get(s, s)}",
 )
 
@@ -193,19 +199,23 @@ try:
     scores = load_scores()
     score_df = pd.DataFrame(scores)
 
-    cols = st.columns(len(BANKING_STOCKS))
-    for col, row in zip(cols, scores):
+    # Filter scores to selected sector
+    _filtered_scores = (
+        scores if selected_sector == "All"
+        else [r for r in scores if r["symbol"] in WATCHLIST.get(selected_sector, [])]
+    )
+
+    # Top-5 tiles
+    _top5 = _filtered_scores[:5]
+    _tile_cols = st.columns(len(_top5))
+    for col, row in zip(_tile_cols, _top5):
         with col:
-            icon = score_colour(row["total_score"])
-            st.metric(
-                label=row["symbol"],
-                value=f"{row['total_score']:.1f}",
-                delta=None,
-            )
-            st.caption(icon)
+            st.metric(label=row["symbol"], value=f"{row['total_score']:.1f}")
+            st.caption(score_colour(row["total_score"]))
 
     st.subheader("Rankings")
-    display_df = score_df[[
+    _filtered_df = pd.DataFrame(_filtered_scores)
+    display_df = _filtered_df[[
         "symbol", "name", "total_score", "technical_score",
         "fundamental_score", "sentiment_score",
     ]].copy()
@@ -392,14 +402,20 @@ except Exception as e:
 
 st.header("🧪 Backtesting")
 
+_bt_sector = st.selectbox(
+    "Sector to backtest",
+    list(WATCHLIST.keys()),
+    key="bt_sector",
+)
 _bt_years = st.slider("Backtest window (years)", 1, 5, 3, key="bt_years")
 _bt_use_opt = st.checkbox("Use walk-forward optimized params", value=False, key="bt_opt")
 
 if st.button("Run backtest", key="run_bt"):
-    _bt_end   = date.today()
-    _bt_start = _bt_end.replace(year=_bt_end.year - _bt_years)
+    _bt_end     = date.today()
+    _bt_start   = _bt_end.replace(year=_bt_end.year - _bt_years)
+    _bt_symbols = WATCHLIST[_bt_sector]
 
-    with st.spinner("Running backtest..."):
+    with st.spinner(f"Running backtest for {_bt_sector} ({len(_bt_symbols)} stocks)..."):
         try:
             from backtesting.engine import BacktestEngine
             from backtesting.metrics import compute_metrics
@@ -410,12 +426,12 @@ if st.button("Run backtest", key="run_bt"):
                 from backtesting.optimizer import load_best_params
                 _all_results = {
                     sym: _engine.run(sym, _bt_start, _bt_end, params=load_best_params(sym))
-                    for sym in BANKING_STOCKS
+                    for sym in _bt_symbols
                 }
             else:
                 _all_results = {
                     sym: _engine.run(sym, _bt_start, _bt_end)
-                    for sym in BANKING_STOCKS
+                    for sym in _bt_symbols
                 }
 
             # ── Summary table ─────────────────────────────────────────────────

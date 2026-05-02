@@ -13,10 +13,10 @@ import yfinance as yf
 from loguru import logger
 from sqlalchemy.dialects.sqlite import insert
 
-from config.settings import BANKING_STOCKS_YF
+from config.settings import ALL_STOCKS_YF
 from data.storage.database import OHLCVDaily, get_session
 
-_YF_TO_SYMBOL = {f"{s}.NS": s for s in [t.replace(".NS", "") for t in BANKING_STOCKS_YF]}
+_YF_TO_SYMBOL = {yf_sym: yf_sym.replace(".NS", "") for yf_sym in ALL_STOCKS_YF}
 
 
 def fetch_yfinance(symbol_ns: str, start: date, end: date) -> pd.DataFrame:

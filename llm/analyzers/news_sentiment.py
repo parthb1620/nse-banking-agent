@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 from pydantic import BaseModel, Field, field_validator
 
-from config.settings import BANKING_STOCKS, OLLAMA_MODEL_PARSER
+from config.settings import ALL_STOCKS, OLLAMA_MODEL_PARSER
 from data.storage.database import LLMLog, NewsArticle, get_session
 from llm.ollama_client import generate_validated
 
@@ -193,7 +193,7 @@ def process_all_pending(max_per_symbol: int = 10) -> dict[str, int]:
     results: dict[str, int] = {}
 
     with get_session() as session:
-        for symbol in BANKING_STOCKS:
+        for symbol in ALL_STOCKS:
             articles = (
                 session.query(NewsArticle)
                 .filter(

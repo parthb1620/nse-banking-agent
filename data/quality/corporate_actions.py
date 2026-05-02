@@ -17,7 +17,7 @@ import yfinance as yf
 from loguru import logger
 from sqlalchemy import text
 
-from config.settings import BANKING_STOCKS
+from config.settings import ALL_STOCKS
 from data.quality.known_time import compute_usable_from
 from data.storage.database import CorporateAction, get_session
 
@@ -208,6 +208,6 @@ def _compute_factors(action: CorporateAction) -> tuple[float | None, float]:
 
 def run_all() -> None:
     """Fetch and apply corporate actions for every tracked stock."""
-    for symbol in BANKING_STOCKS:
+    for symbol in ALL_STOCKS:
         fetch_and_store_actions(symbol)
         apply_adjustments(symbol)

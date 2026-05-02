@@ -18,8 +18,20 @@ from sqlalchemy.dialects.sqlite import insert
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config.nse_calendar import is_trading_day, trading_days_between
-from config.settings import BANKING_STOCKS, DATA_BACKFILL_YEARS, NSE_BHAVCOPY_URL
+from config.settings import LONGTERM_UNIVERSE, DATA_BACKFILL_YEARS, NSE_BHAVCOPY_URL
+
+# All tracked symbols across every engine universe (large-cap + midcap)
+ALL_STOCKS = LONGTERM_UNIVERSE
 from data.storage.database import OHLCVDaily, get_session
+
+# NSE bhavcopy uses different ticker symbols for some stocks.
+# Keys are our canonical config symbols; values are what appear in the bhavcopy CSV.
+_BHAVCOPY_SYMBOL: dict[str, str] = {
+    "KPIT":     "KPITTECH",
+    "VARUNBEV": "VBL",
+}
+# Reverse map: bhavcopy symbol → config symbol (for renaming after filter)
+_BHAVCOPY_REVERSE: dict[str, str] = {v: k for k, v in _BHAVCOPY_SYMBOL.items()}
 
 _HEADERS = {
     "User-Agent": (
@@ -82,10 +94,15 @@ def download_bhavcopy(trading_date: date) -> pd.DataFrame | None:
             logger.error(f"Bhavcopy for {trading_date}: cannot find SYMBOL column. Columns: {df.columns.tolist()}")
             return None
 
-        df = df[df[sym_col].str.strip().isin(BANKING_STOCKS)].copy()
+        # Build the filter set: config symbols + their bhavcopy aliases
+        bhavcopy_symbols = set(ALL_STOCKS) | set(_BHAVCOPY_SYMBOL.values())
+        df = df[df[sym_col].str.strip().isin(bhavcopy_symbols)].copy()
         if df.empty:
-            logger.warning(f"Bhavcopy for {trading_date}: none of the banking stocks found")
+            logger.warning(f"Bhavcopy for {trading_date}: none of the tracked stocks found")
             return None
+
+        # Rename bhavcopy aliases back to canonical config symbols (KPITTECH→KPIT, VBL→VARUNBEV)
+        df[sym_col] = df[sym_col].str.strip().replace(_BHAVCOPY_REVERSE)
 
         # Handle both Bhavcopy column formats:
         #   sec_bhavdata_full: OPEN_PRICE, HIGH_PRICE, LOW_PRICE, CLOSE_PRICE, TTL_TRD_QNTY
@@ -160,28 +177,38 @@ def run_daily(trading_date: date | None = None) -> None:
     logger.info(f"Bhavcopy {d}: stored {n} rows")
 
 
-def backfill_history(years: int = DATA_BACKFILL_YEARS) -> None:
+def backfill_history(years: int = DATA_BACKFILL_YEARS, symbol: str | None = None) -> None:
     """
     Download Bhavcopy for every trading day in the past `years` years.
-    Skips dates already present in ohlcv_daily with source='nse_bhavcopy'.
-    Safe to run repeatedly — already-stored dates are skipped.
+    If `symbol` is given, only fetch dates where that symbol is missing from ohlcv_daily.
+    Otherwise, skips dates that already have ANY bhavcopy row (global mode).
+    Safe to run repeatedly — already-stored data is upserted without duplicating.
     """
     end   = date.today() - timedelta(days=1)
     start = date(end.year - years, end.month, end.day)
     days  = trading_days_between(start, end)
 
-    # Find already-stored dates to avoid redundant downloads
+    import sqlalchemy as _sa
     with get_session() as session:
-        stored = {
-            r[0] for r in session.execute(
-                __import__("sqlalchemy").text(
-                    "SELECT date FROM ohlcv_daily WHERE source='nse_bhavcopy'"
-                )
-            ).fetchall()
-        }
+        if symbol:
+            # Per-symbol mode: only fetch dates where this symbol has no ohlcv_daily row
+            stored = {
+                r[0] for r in session.execute(
+                    _sa.text("SELECT date FROM ohlcv_daily WHERE symbol = :sym"),
+                    {"sym": symbol},
+                ).fetchall()
+            }
+        else:
+            # Global mode: skip dates that have any bhavcopy data
+            stored = {
+                r[0] for r in session.execute(
+                    _sa.text("SELECT date FROM ohlcv_daily WHERE source='nse_bhavcopy'")
+                ).fetchall()
+            }
 
     missing = [d for d in days if d not in stored]
-    logger.info(f"Bhavcopy backfill: {len(missing)} dates to fetch over {years} years")
+    label = symbol or "all stocks"
+    logger.info(f"Bhavcopy backfill ({label}): {len(missing)} dates to fetch over {years} years")
 
     for i, d in enumerate(missing, 1):
         df = download_bhavcopy(d)

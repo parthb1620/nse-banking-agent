@@ -12,7 +12,7 @@ Detects the pattern:
 When all four conditions are true and no alert was sent today for that symbol,
 fires a Telegram notification immediately.
 
-Data source: yfinance 1-min bars (.NS suffix). Note: ~15 min delay for NSE.
+Data source: Groww live-data API (real-time) with yfinance fallback.
 Prev close: from the local OHLCVDaily table.
 
 Run manually for testing:
@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 
 from config.nse_calendar import is_trading_day
-from config.settings import BANKING_STOCKS, STOCK_NAMES
+from config.settings import ALL_STOCKS, ALL_STOCK_NAMES as STOCK_NAMES, SYMBOL_SECTOR
 
 _IST = ZoneInfo("Asia/Kolkata")
 
@@ -36,8 +36,14 @@ _VOLUME_RATIO   = 1.5     # late-window volume must be ≥ this × avg 10-min bu
 _EARLY_WINDOW   = (14, 30, 14, 55)   # (start_h, start_m, end_h, end_m) IST
 _LATE_WINDOW    = (15,  0, 15, 25)   # recovery check window
 
-# Filing keywords that indicate an earnings / result event
-_RESULT_KEYWORDS = {"result", "financial", "earnings", "profit", "quarterly", "annual", "q1", "q2", "q3", "q4"}
+# Matches NSE filing subjects like "Board Meeting Outcome-Financial Results/Dividend"
+# and news headlines like "AXISBANK Q4 results today"
+_RESULT_KEYWORDS = {
+    "result", "financial", "earnings", "profit",
+    "quarterly", "annual", "q1", "q2", "q3", "q4",
+    "board meeting outcome", "board meeting", "outcome",
+    "dividend", "pat", "net profit", "revenue",
+}
 
 # In-memory deduplication — {symbol: date} — prevents repeat alerts on same day
 _alerted: dict[str, date] = {}
@@ -66,11 +72,13 @@ def _prev_close(symbol: str) -> float | None:
 
 def _recent_result_filing(symbol: str, hours: int = 48) -> str | None:
     """
-    Return the subject of the most recent earnings-related filing, or None.
-    Only looks back `hours` hours to stay relevant.
+    Return a description of the most recent earnings-related event, or None.
+    Checks both corporate_filings and news_articles so we catch result-day
+    news even before the official NSE filing lands.
     """
-    from data.storage.database import CorporateFiling, get_session
+    from data.storage.database import CorporateFiling, NewsArticle, get_session
     cutoff = datetime.now(_IST) - timedelta(hours=hours)
+
     with get_session() as s:
         filings = (
             s.query(CorporateFiling)
@@ -81,31 +89,39 @@ def _recent_result_filing(symbol: str, hours: int = 48) -> str | None:
             .order_by(CorporateFiling.published_at.desc())
             .all()
         )
+        news = (
+            s.query(NewsArticle)
+            .filter(
+                NewsArticle.symbol == symbol,
+                NewsArticle.published_at >= cutoff,
+            )
+            .order_by(NewsArticle.published_at.desc())
+            .limit(20)
+            .all()
+        )
+
     for f in filings:
         subject = (f.subject or f.category or "").lower()
         if any(kw in subject for kw in _RESULT_KEYWORDS):
-            return f.subject or f.category or "Recent filing"
+            return f.subject or f.category or "NSE filing"
+
+    for a in news:
+        headline = (a.headline or "").lower()
+        if any(kw in headline for kw in _RESULT_KEYWORDS):
+            return f"[News] {a.headline}"
+
     return None
 
 
 def _intraday_bars(symbol: str) -> "pd.DataFrame | None":
-    """Fetch today's 1-min bars from yfinance. Returns None on failure."""
-    try:
-        import yfinance as yf
-        import pandas as pd
-        ticker = yf.Ticker(f"{symbol}.NS")
-        df = ticker.history(period="1d", interval="1m")
-        if df.empty:
-            return None
-        # Ensure index is tz-aware IST
-        if df.index.tzinfo is None:
-            df.index = df.index.tz_localize("Asia/Kolkata")
-        else:
-            df.index = df.index.tz_convert("Asia/Kolkata")
-        return df
-    except Exception as exc:
-        logger.warning(f"intraday_monitor: yfinance fetch failed for {symbol} — {exc}")
-        return None
+    """
+    Fetch today's 1-min bars. Uses Groww live data (real-time) with yfinance fallback.
+    """
+    from data.collectors.groww_client import fetch_intraday_bars
+    df = fetch_intraday_bars(symbol)
+    if df is None or df.empty:
+        logger.warning(f"intraday_monitor: no intraday bars for {symbol}")
+    return df
 
 
 def _window_bars(df: "pd.DataFrame", start_h: int, start_m: int, end_h: int, end_m: int) -> "pd.DataFrame":
@@ -181,6 +197,7 @@ def _check_symbol(symbol: str) -> bool:
 
     # ── All conditions met — fire alert ──────────────────────────────────────
     stock_name = STOCK_NAMES.get(symbol, symbol)
+    sector = SYMBOL_SECTOR.get(symbol, "Unknown")
     logger.info(
         f"intraday_monitor: RECOVERY DETECTED {symbol}  "
         f"trough={pct_at_trough:+.2f}%  now={pct_now:+.2f}%  vol={volume_ratio:.1f}×"
@@ -191,6 +208,7 @@ def _check_symbol(symbol: str) -> bool:
         send_late_recovery_alert(
             symbol         = symbol,
             stock_name     = stock_name,
+            sector         = sector,
             pct_at_trough  = pct_at_trough,
             pct_now        = pct_now,
             volume_ratio   = volume_ratio,
@@ -222,9 +240,9 @@ def run() -> None:
         logger.debug(f"intraday_monitor: outside window ({now_ist}) — skipping")
         return
 
-    logger.info(f"intraday_monitor: scanning {len(BANKING_STOCKS)} stocks at {now_ist}")
+    logger.info(f"intraday_monitor: scanning {len(ALL_STOCKS)} stocks at {now_ist}")
     alerts_fired = 0
-    for symbol in BANKING_STOCKS:
+    for symbol in ALL_STOCKS:
         try:
             if _check_symbol(symbol):
                 alerts_fired += 1
@@ -241,7 +259,7 @@ if __name__ == "__main__":
     init_db()
 
     symbol = sys.argv[1].upper() if len(sys.argv) > 1 else None
-    symbols = [symbol] if symbol else BANKING_STOCKS
+    symbols = [symbol] if symbol else ALL_STOCKS
 
     for sym in symbols:
         df = _intraday_bars(sym)

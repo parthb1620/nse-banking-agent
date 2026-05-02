@@ -128,8 +128,10 @@ def store(data: dict) -> bool:
 
     # Replace existing row for this date, or append
     rows = [r for r in rows if r["date"] != date_str]
-    rows.append({k: data.get(k, 0) for k in _CSV_HEADERS})
-    rows.sort(key=lambda r: r["date"])
+    row = {k: data.get(k, 0) for k in _CSV_HEADERS}
+    row["date"] = date_str   # ensure it's a string, not datetime.date
+    rows.append(row)
+    rows.sort(key=lambda r: str(r["date"]))
 
     _save_csv(rows)
     logger.info(

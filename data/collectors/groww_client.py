@@ -53,6 +53,7 @@ _INSTRUMENTS_CSV_URL = "https://growwapi-assets.groww.in/instruments/instrument.
 _TOKEN_ENDPOINT      = "/v1/token/api/access"
 _HISTORY_ENDPOINT    = "/v1/historical/candle/range"
 _LTP_ENDPOINT        = "/v1/live-data/ltp"
+_QUOTE_ENDPOINT      = "/v1/live-data/quote"
 _HOLDINGS_ENDPOINT   = "/v1/holdings/user"
 
 _MAX_DAYS_PER_REQUEST = 180
@@ -421,6 +422,195 @@ def _rest_fetch_ltp(symbols: list[str]) -> dict[str, float]:
     except Exception as exc:
         logger.error(f"Groww LTP failed: {exc}")
         return {}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Live quote (LTP + today's volume/OHLC for a single symbol)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def fetch_live_quote(symbol: str) -> dict:
+    """
+    Real-time quote for one NSE symbol via the /live-data/quote endpoint.
+    Returns dict with keys: ltp, volume, open, high, low, close.
+    Returns {} on any failure — callers must handle gracefully.
+    """
+    if _USE_SDK:
+        return _sdk_fetch_quote(symbol)
+    return _rest_fetch_quote(symbol)
+
+
+def _sdk_fetch_quote(symbol: str) -> dict:
+    client = _sdk()
+    if not client:
+        return {}
+    try:
+        resp = client.get_quote(trading_symbol=symbol, exchange="NSE", segment="CASH")
+        return _parse_quote(resp)
+    except Exception as exc:
+        logger.debug(f"Groww SDK quote failed for {symbol}: {exc}")
+        return {}
+
+
+def _rest_fetch_quote(symbol: str) -> dict:
+    headers = _rest_headers()
+    if not headers:
+        return {}
+    try:
+        resp = requests.get(
+            f"{GROWW_BASE_URL}{_QUOTE_ENDPOINT}",
+            headers=headers,
+            params={"exchange": "NSE", "segment": "CASH", "trading_symbol": symbol},
+            timeout=10,
+        )
+        if resp.status_code in (401, 403):
+            logger.debug(f"Groww quote auth error {resp.status_code} for {symbol}")
+            return {}
+        resp.raise_for_status()
+        body = resp.json()
+        return _parse_quote(body.get("payload") or body.get("data") or body)
+    except Exception as exc:
+        logger.debug(f"Groww REST quote failed for {symbol}: {exc}")
+        return {}
+
+
+def _parse_quote(data: dict) -> dict:
+    """Normalize quote response fields across SDK versions."""
+    if not data:
+        return {}
+    ltp   = data.get("ltp") or data.get("last_traded_price") or data.get("lastTradedPrice")
+    vol   = (data.get("volume") or data.get("total_traded_volume")
+             or data.get("totalTradedVolume") or data.get("totalBuyQuantity"))
+    open_ = data.get("open") or data.get("open_price") or data.get("openPrice")
+    high  = data.get("high") or data.get("day_high") or data.get("dayHigh")
+    low   = data.get("low") or data.get("day_low") or data.get("dayLow")
+    close = data.get("close") or data.get("prev_close") or data.get("prevClose")
+    if ltp is None:
+        return {}
+    return {
+        "ltp":    float(ltp),
+        "volume": int(vol) if vol else 0,
+        "open":   float(open_) if open_ else None,
+        "high":   float(high) if high else None,
+        "low":    float(low) if low else None,
+        "close":  float(close) if close else None,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Intraday bars (1-min candles for today)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def fetch_intraday_bars(symbol: str) -> "pd.DataFrame | None":
+    """
+    Today's 1-minute intraday bars as a DataFrame with an IST-aware DatetimeIndex
+    and columns [Open, High, Low, Close, Volume].
+
+    Tries Groww's historical candle endpoint first (real-time, no delay).
+    Falls back to yfinance (~15-min delay) if Groww fails or returns no data.
+    """
+    import pandas as pd
+    from zoneinfo import ZoneInfo
+    _IST = ZoneInfo("Asia/Kolkata")
+
+    today     = date.today()
+    start_str = f"{today} 09:15:00"
+    end_str   = datetime.now(_IST).strftime("%Y-%m-%d %H:%M:%S")
+
+    candles = _fetch_today_candles(symbol, start_str, end_str)
+    if candles:
+        df = _candles_to_df(candles)
+        if df is not None:
+            logger.debug(f"Groww intraday bars: {symbol} — {len(df)} bars")
+            return df
+
+    return _yfinance_intraday(symbol)
+
+
+def _fetch_today_candles(symbol: str, start_str: str, end_str: str) -> list:
+    """Fetch raw 1-min candles from Groww (SDK then REST). Returns [] on failure."""
+    if _USE_SDK:
+        client = _sdk()
+        if client:
+            try:
+                resp = client.get_historical_candle_data(
+                    trading_symbol=symbol, exchange="NSE", segment="CASH",
+                    start_time=start_str, end_time=end_str, interval_in_minutes=1,
+                )
+                candles = (resp or {}).get("candles", [])
+                if candles:
+                    return candles
+            except Exception as exc:
+                logger.debug(f"Groww SDK intraday bars ({symbol}): {exc}")
+
+    headers = _rest_headers()
+    if headers:
+        try:
+            resp = requests.get(
+                f"{GROWW_BASE_URL}{_HISTORY_ENDPOINT}", headers=headers,
+                params={
+                    "exchange": "NSE", "segment": "CASH", "trading_symbol": symbol,
+                    "start_time": start_str, "end_time": end_str, "interval_in_minutes": 1,
+                },
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                body = resp.json()
+                data = body.get("payload") or body.get("data") or body
+                if isinstance(data, dict):
+                    candles = data.get("candles", [])
+                    if candles:
+                        return candles
+        except Exception as exc:
+            logger.debug(f"Groww REST intraday bars ({symbol}): {exc}")
+
+    return []
+
+
+def _candles_to_df(candles: list) -> "pd.DataFrame | None":
+    """Convert raw candle list [[ts,o,h,l,c,v], ...] to an IST-indexed DataFrame."""
+    import pandas as pd
+    from zoneinfo import ZoneInfo
+    _IST = ZoneInfo("Asia/Kolkata")
+
+    rows = []
+    for c in candles:
+        if len(c) < 6:
+            continue
+        ts = c[0]
+        if isinstance(ts, (int, float)):
+            ts_sec = ts / 1000 if ts > 1e10 else ts
+            dt = datetime.fromtimestamp(ts_sec, tz=timezone.utc).astimezone(_IST)
+        else:
+            dt = datetime.fromisoformat(str(ts))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_IST)
+        rows.append({"dt": dt, "Open": float(c[1]), "High": float(c[2]),
+                     "Low": float(c[3]), "Close": float(c[4]), "Volume": int(c[5])})
+
+    if not rows:
+        return None
+    df = pd.DataFrame(rows).set_index("dt").sort_index()
+    return df
+
+
+def _yfinance_intraday(symbol: str) -> "pd.DataFrame | None":
+    """yfinance fallback for 1-min intraday bars (~15-min delay)."""
+    try:
+        import yfinance as yf
+        from zoneinfo import ZoneInfo
+        _IST = ZoneInfo("Asia/Kolkata")
+        ticker = yf.Ticker(f"{symbol}.NS")
+        df = ticker.history(period="1d", interval="1m")
+        if df.empty:
+            return None
+        if df.index.tzinfo is None:
+            df.index = df.index.tz_localize(_IST)
+        else:
+            df.index = df.index.tz_convert(_IST)
+        return df
+    except Exception as exc:
+        logger.warning(f"yfinance intraday fallback failed for {symbol}: {exc}")
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════

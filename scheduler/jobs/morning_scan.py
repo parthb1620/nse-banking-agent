@@ -25,7 +25,8 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 
 from config.nse_calendar import is_trading_day
-from config.settings import BANKING_STOCKS, STOCK_NAMES
+from config.settings import ALL_STOCKS as BANKING_STOCKS, ALL_STOCK_NAMES as STOCK_NAMES
+from alerts.telegram_bot import _esc
 
 _IST = ZoneInfo("Asia/Kolkata")
 
@@ -197,7 +198,7 @@ def _recent_headlines(n: int = 5) -> list[str]:
             .limit(n)
             .all()
         )
-        return [f"[{a.symbol}] {a.headline}" for a in arts if a.headline]
+        return [f"[{_esc(a.symbol)}] {_esc(a.headline)}" for a in arts if a.headline]
 
 
 def build_message(
@@ -213,7 +214,7 @@ def build_message(
 
     # Top 3 picks
     top3 = scores[:3]
-    picks = "  ".join(f"{r['symbol']} ({r['total_score']:.0f})" for r in top3)
+    picks = "  ".join(f"{_esc(r['symbol'])} ({r['total_score']:.0f})" for r in top3)
     lines.append(f"\n🏆 <b>Top picks:</b> {picks}")
     lines.append("─" * 32)
 
@@ -222,7 +223,7 @@ def build_message(
         sig = signals.get(sym, {})
         sig_str = f"{sig.get('type','?')} str={sig.get('strength',0)}" if sig else "no signal"
         lines.append(
-            f"<b>{sym}</b>  Tech:{r.get('technical_score',0):.0f}  "
+            f"<b>{_esc(sym)}</b>  Tech:{r.get('technical_score',0):.0f}  "
             f"Fund:{r.get('fundamental_score',0):.0f}  "
             f"Sent:{r.get('sentiment_score',0):.0f}  → {sig_str}"
         )
@@ -230,14 +231,14 @@ def build_message(
         if llm_insights and sym in llm_insights:
             insight = llm_insights[sym]
             if insight.get("thesis"):
-                lines.append(f"  📝 {insight['thesis']}")
+                lines.append(f"  📝 {_esc(insight['thesis'])}")
             if insight.get("risk"):
-                lines.append(f"  ⚠️ Risk: {insight['risk']}")
+                lines.append(f"  ⚠️ Risk: {_esc(insight['risk'])}")
 
     # All stocks ranked
     lines.append("\n📋 <b>Full ranking:</b>")
     for i, r in enumerate(scores, 1):
-        lines.append(f"  {i}. {r['symbol']:<12} {r['total_score']:.1f}")
+        lines.append(f"  {i}. {_esc(r['symbol']):<12} {r['total_score']:.1f}")
 
     # FII/DII institutional flow
     if fii_status and fii_status.get("available"):

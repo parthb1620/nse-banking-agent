@@ -38,12 +38,16 @@ LLM_RISK_NUM_PREDICT = 1200   # deepseek-r1 needs more tokens for chain-of-thoug
 # ── Telegram ───────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+# Additional chat IDs to broadcast to (comma-separated in env, e.g. "111,222")
+_extra_raw = os.getenv("TELEGRAM_EXTRA_CHAT_IDS", "1515854594")
+TELEGRAM_EXTRA_CHAT_IDS: list[str] = [c.strip() for c in _extra_raw.split(",") if c.strip()]
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
-# ── Banking Stocks ─────────────────────────────────────────────────────────────
+# ── Sector Stock Lists ─────────────────────────────────────────────────────────
 # NSE symbols (no suffix) — used for Bhavcopy and all NSE APIs
+
 BANKING_STOCKS = [
     "HDFCBANK",
     "ICICIBANK",
@@ -54,18 +58,235 @@ BANKING_STOCKS = [
     "FEDERALBNK",
 ]
 
+IT_STOCKS = [
+    "TCS",
+    "INFY",
+    "WIPRO",
+    "HCLTECH",
+    "TECHM",
+    "LTM",       # LTIMindtree (renamed from LTIM)
+    "MPHASIS",
+    "COFORGE",
+]
+
+FMCG_STOCKS = [
+    "HINDUNILVR",
+    "ITC",
+    "NESTLEIND",
+    "BRITANNIA",
+    "MARICO",
+    "DABUR",
+    "GODREJCP",
+]
+
+PHARMA_STOCKS = [
+    "SUNPHARMA",
+    "DRREDDY",
+    "CIPLA",
+    "DIVISLAB",
+    "LUPIN",
+    "AUROPHARMA",
+]
+
+AUTO_STOCKS = [
+    "MARUTI",
+    "TMPV",      # Tata Motors Passenger Vehicles (demerged from TATAMOTORS, listed Oct 2025)
+    # "TMLCV",   # Tata Motors Commercial Vehicles — not yet listed on NSE; add when trading begins
+    "M&M",
+    "BAJAJ-AUTO",
+    "HEROMOTOCO",
+    "EICHERMOT",
+]
+
+ENERGY_STOCKS = [
+    "RELIANCE",
+    "ONGC",
+    "NTPC",
+    "POWERGRID",
+    "COALINDIA",
+    "WAAREEENER",   # Waaree Energies — solar/green energy
+]
+
+METALS_STOCKS = [
+    "TATASTEEL",
+    "HINDALCO",
+    "JSWSTEEL",
+    "VEDL",
+    "NMDC",
+]
+
+# Sector → symbol-list mapping (used for sector-aware reporting)
+WATCHLIST: dict[str, list[str]] = {
+    "Banking": BANKING_STOCKS,
+    "IT":      IT_STOCKS,
+    "FMCG":   FMCG_STOCKS,
+    "Pharma":  PHARMA_STOCKS,
+    "Auto":    AUTO_STOCKS,
+    "Energy":  ENERGY_STOCKS,
+    "Metals":  METALS_STOCKS,
+}
+
+# Flat list of all symbols across every sector
+ALL_STOCKS: list[str] = [s for stocks in WATCHLIST.values() for s in stocks]
+
 # yfinance symbols — used ONLY for fallback / backfill (Phase 1 fallback path)
 BANKING_STOCKS_YF = [f"{s}.NS" for s in BANKING_STOCKS]
+ALL_STOCKS_YF     = [f"{s}.NS" for s in ALL_STOCKS]
 
 STOCK_NAMES = {
-    "HDFCBANK":   "HDFC Bank",
-    "ICICIBANK":  "ICICI Bank",
-    "SBIN":       "State Bank of India",
-    "AXISBANK":   "Axis Bank",
-    "KOTAKBANK":  "Kotak Mahindra Bank",
-    "BANKBARODA": "Bank of Baroda",
-    "FEDERALBNK": "Federal Bank",
+    # Banking
+    "HDFCBANK":    "HDFC Bank",
+    "ICICIBANK":   "ICICI Bank",
+    "SBIN":        "State Bank of India",
+    "AXISBANK":    "Axis Bank",
+    "KOTAKBANK":   "Kotak Mahindra Bank",
+    "BANKBARODA":  "Bank of Baroda",
+    "FEDERALBNK":  "Federal Bank",
+    # IT
+    "TCS":         "Tata Consultancy Services",
+    "INFY":        "Infosys",
+    "WIPRO":       "Wipro",
+    "HCLTECH":     "HCL Technologies",
+    "TECHM":       "Tech Mahindra",
+    "LTM":         "LTIMindtree",
+    "MPHASIS":     "Mphasis",
+    "COFORGE":     "Coforge",
+    # FMCG
+    "HINDUNILVR":  "Hindustan Unilever",
+    "ITC":         "ITC",
+    "NESTLEIND":   "Nestle India",
+    "BRITANNIA":   "Britannia Industries",
+    "MARICO":      "Marico",
+    "DABUR":       "Dabur India",
+    "GODREJCP":    "Godrej Consumer Products",
+    # Pharma
+    "SUNPHARMA":   "Sun Pharmaceutical",
+    "DRREDDY":     "Dr. Reddy's Laboratories",
+    "CIPLA":       "Cipla",
+    "DIVISLAB":    "Divi's Laboratories",
+    "LUPIN":       "Lupin",
+    "AUROPHARMA":  "Aurobindo Pharma",
+    # Auto
+    "MARUTI":      "Maruti Suzuki",
+    "TMPV":        "Tata Motors Passenger Vehicles",
+    # "TMLCV":    "Tata Motors Commercial Vehicles",  # add when listed on NSE
+    "M&M":         "Mahindra & Mahindra",
+    "BAJAJ-AUTO":  "Bajaj Auto",
+    "HEROMOTOCO":  "Hero MotoCorp",
+    "EICHERMOT":   "Eicher Motors",
+    # Energy
+    "RELIANCE":    "Reliance Industries",
+    "ONGC":        "Oil & Natural Gas Corporation",
+    "NTPC":        "NTPC",
+    "POWERGRID":   "Power Grid Corporation",
+    "COALINDIA":   "Coal India",
+    "WAAREEENER":  "Waaree Energies",
+    # Metals
+    "TATASTEEL":   "Tata Steel",
+    "HINDALCO":    "Hindalco Industries",
+    "JSWSTEEL":    "JSW Steel",
+    "VEDL":        "Vedanta",
+    "NMDC":        "NMDC",
 }
+
+# Reverse lookup: symbol → sector name
+SYMBOL_SECTOR: dict[str, str] = {
+    sym: sector
+    for sector, syms in WATCHLIST.items()
+    for sym in syms
+}
+
+# ALL_STOCK_NAMES is an alias kept for convenience in multi-sector modules
+ALL_STOCK_NAMES = STOCK_NAMES
+
+# ── Midcap / Smallcap additions ───────────────────────────────────────────────
+# These trade alongside large-caps in long-term and short-term engines.
+# All are F&O-eligible or top-200 by market cap — liquid enough for paper trading.
+
+MIDCAP_STOCKS = [
+    # IT midcap
+    "LTTS",        # L&T Technology Services
+    "PERSISTENT",  # Persistent Systems
+    "KPIT",        # KPIT Technologies
+    "TATAELXSI",   # Tata Elxsi
+    # Pharma midcap
+    "ALKEM",       # Alkem Laboratories
+    "TORNTPHARM",  # Torrent Pharmaceuticals
+    # Banking / NBFC midcap
+    "BANDHANBNK",  # Bandhan Bank
+    "IDFCFIRSTB",  # IDFC First Bank
+    "CANBK",       # Canara Bank
+    # Auto midcap
+    "TVSMOTOR",    # TVS Motor Company
+    "BALKRISIND",  # Balkrishna Industries
+    # FMCG midcap
+    "VARUNBEV",    # Varun Beverages
+    "COLPAL",      # Colgate-Palmolive India
+    # Metals midcap
+    "APLAPOLLO",   # APL Apollo Tubes
+    "JINDALSTEL",  # Jindal Steel & Power
+]
+
+MIDCAP_STOCK_NAMES: dict[str, str] = {
+    "LTTS":        "L&T Technology Services",
+    "PERSISTENT":  "Persistent Systems",
+    "KPIT":        "KPIT Technologies",
+    "TATAELXSI":   "Tata Elxsi",
+    "ALKEM":       "Alkem Laboratories",
+    "TORNTPHARM":  "Torrent Pharmaceuticals",
+    "BANDHANBNK":  "Bandhan Bank",
+    "IDFCFIRSTB":  "IDFC First Bank",
+    "CANBK":       "Canara Bank",
+    "TVSMOTOR":    "TVS Motor Company",
+    "BALKRISIND":  "Balkrishna Industries",
+    "VARUNBEV":    "Varun Beverages",
+    "COLPAL":      "Colgate-Palmolive India",
+    "APLAPOLLO":   "APL Apollo Tubes",
+    "JINDALSTEL":  "Jindal Steel & Power",
+}
+
+# Merge into master name lookup
+STOCK_NAMES.update(MIDCAP_STOCK_NAMES)
+ALL_STOCK_NAMES = STOCK_NAMES
+
+# ── Per-engine stock universes ────────────────────────────────────────────────
+# Each engine operates on a specific universe; smaller = faster cycle time.
+
+LONGTERM_UNIVERSE  = ALL_STOCKS + MIDCAP_STOCKS          # 60 stocks — weekly scan
+SHORTTERM_UNIVERSE = ALL_STOCKS                           # 45 stocks — daily EOD
+BTST_UNIVERSE      = ALL_STOCKS                           # 45 stocks — 14:30 IST scan
+INTRADAY_UNIVERSE  = [                                    # 20 most liquid — real-time
+    # Banking (highest F&O OI)
+    "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
+    # IT
+    "TCS", "INFY", "WIPRO", "HCLTECH",
+    # Diversified large-cap
+    "RELIANCE", "MARUTI", "TATASTEEL", "HINDALCO", "JSWSTEEL",
+    # FMCG / Pharma
+    "HINDUNILVR", "ITC", "SUNPHARMA",
+    # Auto
+    "M&M", "BAJAJ-AUTO", "EICHERMOT",
+]
+
+# ── Engine capital allocation (fraction of PAPER_TRADING_CAPITAL) ─────────────
+ENGINE_CAPITAL_SPLIT = {
+    "longterm":  0.40,
+    "shortterm": 0.30,
+    "btst":      0.20,
+    "intraday":  0.10,
+}
+
+# ── Per-engine score weights: (technical, fundamental, sentiment) ─────────────
+ENGINE_WEIGHTS = {
+    "longterm":  (0.20, 0.60, 0.20),
+    "shortterm": (0.50, 0.30, 0.20),   # same as current defaults
+    "btst":      (0.70, 0.10, 0.20),
+    "intraday":  (1.00, 0.00, 0.00),   # pure price action
+}
+
+# ── Engine scheduler times (IST) ─────────────────────────────────────────────
+BTST_SCAN_TIME      = "14:30"   # BTST signal scan — 45 min before close
+LONGTERM_SCAN_TIME  = "08:00"   # Sunday only — weekly long-term scan
 
 # ── Technical Indicator Parameters ────────────────────────────────────────────
 EMA_PERIODS  = [9, 21, 50, 200]

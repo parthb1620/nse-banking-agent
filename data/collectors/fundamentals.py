@@ -18,9 +18,17 @@ from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config.nse_calendar import next_trading_day
-from config.settings import BANKING_STOCKS, SCREENER_BASE_URL, SCREENER_DELAY_SEC
+from config.settings import ALL_STOCKS, SCREENER_BASE_URL, SCREENER_DELAY_SEC
 from data.quality.known_time import compute_usable_from
 from data.storage.database import Fundamental, get_session
+
+# Screener.in slugs that differ from the NSE symbol
+_SCREENER_SLUG: dict[str, str] = {
+    "LTM":      "543458/consolidated",   # LTIMindtree — renamed from LTIM
+    "TMPV":     "TMPV/consolidated",     # Tata Motors Passenger Vehicles (demerged)
+    "KPIT":     "KPITTECH/consolidated", # KPIT Technologies (listed as KPITTECH on Screener)
+    "VARUNBEV": "VBL/consolidated",      # Varun Beverages (listed as VBL on Screener)
+}
 
 _HEADERS = {
     "User-Agent": (
@@ -36,7 +44,8 @@ _HEADERS = {
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=3, max=15))
 def _fetch_page(symbol: str) -> BeautifulSoup | None:
     """Fetch Screener.in company page. Returns parsed HTML or None."""
-    url = f"{SCREENER_BASE_URL}/company/{symbol}/"
+    slug = _SCREENER_SLUG.get(symbol, symbol)
+    url = f"{SCREENER_BASE_URL}/company/{slug}/"
     try:
         resp = requests.get(url, headers=_HEADERS, timeout=20)
         if resp.status_code == 404:
@@ -288,7 +297,7 @@ def fetch_and_store(symbol: str) -> int:
 
 def run_all() -> None:
     """Fetch fundamentals for all tracked stocks."""
-    for symbol in BANKING_STOCKS:
+    for symbol in ALL_STOCKS:
         fetch_and_store(symbol)
 
 

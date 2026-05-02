@@ -13,7 +13,7 @@ import requests
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from config.settings import BANKING_STOCKS
+from config.settings import ALL_STOCKS
 from data.quality.known_time import compute_usable_from
 from data.storage.database import CorporateFiling, get_session
 
@@ -156,5 +156,5 @@ def run_all(days_back: int = 365) -> None:
     """Fetch recent filings for all tracked stocks."""
     from datetime import timedelta
     from_date = date.today() - timedelta(days=days_back)
-    for symbol in BANKING_STOCKS:
+    for symbol in ALL_STOCKS:
         fetch_and_store(symbol, from_date)

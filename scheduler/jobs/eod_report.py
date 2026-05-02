@@ -21,7 +21,8 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 
 from config.nse_calendar import is_trading_day, prev_trading_day
-from config.settings import BANKING_STOCKS, STOCK_NAMES
+from config.settings import ALL_STOCKS as BANKING_STOCKS, ALL_STOCK_NAMES as STOCK_NAMES
+from alerts.telegram_bot import _esc
 
 _IST = ZoneInfo("Asia/Kolkata")
 
@@ -67,7 +68,7 @@ def build_message(
     for r in scores[:5]:
         sym = r["symbol"]
         chg = _score_change_str(r["total_score"], prev_scores.get(sym))
-        score_parts.append(f"{sym} {r['total_score']:.0f} {chg}".strip())
+        score_parts.append(f"{_esc(sym)} {r['total_score']:.0f} {chg}".strip())
     lines.append("\n📊 <b>Scores:</b> " + "  |  ".join(score_parts))
     lines.append("─" * 32)
 
@@ -78,12 +79,12 @@ def build_message(
     if buy_signals:
         lines.append("\n🟢 <b>BUY signals:</b>")
         for sym, sig in buy_signals:
-            lines.append(f"  {sym}  str={sig['strength']}  — {sig['reason'][:80]}")
+            lines.append(f"  {_esc(sym)}  str={sig['strength']}  — {_esc(sig['reason'][:80])}")
 
     if sell_signals:
         lines.append("\n🔴 <b>SELL / exit signals:</b>")
         for sym, sig in sell_signals:
-            lines.append(f"  {sym}  str={sig['strength']}  — {sig['reason'][:80]}")
+            lines.append(f"  {_esc(sym)}  str={sig['strength']}  — {_esc(sig['reason'][:80])}")
 
     if not buy_signals and not sell_signals:
         lines.append("\n⚪ No actionable signals today — all NEUTRAL")
@@ -93,7 +94,7 @@ def build_message(
     for i, r in enumerate(scores, 1):
         sym = r["symbol"]
         chg = _score_change_str(r["total_score"], prev_scores.get(sym))
-        lines.append(f"  {i}. {sym:<12} {r['total_score']:.1f} {chg}")
+        lines.append(f"  {i}. {_esc(sym):<12} {r['total_score']:.1f} {chg}")
 
     return "\n".join(lines)
 

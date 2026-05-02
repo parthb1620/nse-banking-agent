@@ -25,7 +25,7 @@ _RSS_HEADERS = {
 }
 
 from config.nse_calendar import is_trading_day, next_trading_day
-from config.settings import BANKING_STOCKS
+from config.settings import ALL_STOCKS
 from data.quality.known_time import compute_usable_from
 from data.storage.database import NewsArticle, get_session
 
@@ -157,7 +157,7 @@ def fetch_and_store(symbol: str) -> int:
 
 def run_all() -> None:
     """Fetch news for all tracked stocks."""
-    for symbol in BANKING_STOCKS:
+    for symbol in ALL_STOCKS:
         fetch_and_store(symbol)
 
 

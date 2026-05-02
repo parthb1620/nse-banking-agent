@@ -18,7 +18,7 @@ from typing import Optional
 
 from loguru import logger
 
-from config.settings import BANKING_STOCKS
+from config.settings import ALL_STOCKS
 from data.quality.known_time import known_time_filter
 from data.storage.database import Fundamental, OHLCVDaily, get_session
 
@@ -119,4 +119,4 @@ def score(symbol: str, signal_time: datetime) -> float:
 def score_all(signal_time: Optional[datetime] = None) -> dict[str, float]:
     """Return {symbol: score} for all tracked stocks."""
     signal_time = signal_time or datetime.now()
-    return {s: score(s, signal_time) for s in BANKING_STOCKS}
+    return {s: score(s, signal_time) for s in ALL_STOCKS}

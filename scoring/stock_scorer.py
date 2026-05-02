@@ -20,7 +20,7 @@ from analysis.fundamental.banking_metrics import score as banking_score
 from analysis.fundamental.ratios import score as ratios_score
 from analysis.technical.signals import score as technical_score
 from config.settings import (
-    BANKING_STOCKS, LLM_ACCURACY_LOW_WEIGHT, LLM_ACCURACY_THRESHOLD,
+    ALL_STOCKS, BANKING_STOCKS, LLM_ACCURACY_LOW_WEIGHT, LLM_ACCURACY_THRESHOLD,
     SCORE_WEIGHT_FUNDAMENTAL, SCORE_WEIGHT_SENTIMENT, SCORE_WEIGHT_TECHNICAL,
     STOCK_NAMES,
 )
@@ -101,10 +101,16 @@ def score_stock(symbol: str, signal_time: Optional[datetime] = None) -> dict:
     tech_w, fund_w, sent_w = _effective_weights()
 
     t_score = technical_score(symbol, signal_time)
-    b_score = banking_score(symbol, signal_time)
     r_score = ratios_score(symbol, signal_time)
-    f_score = round((b_score + r_score) / 2.0, 2)
     s_score = _sentiment_score(symbol, signal_time)
+
+    if symbol in BANKING_STOCKS:
+        b_score = banking_score(symbol, signal_time)
+        f_score = round((b_score + r_score) / 2.0, 2)
+    else:
+        # Non-banking stocks have no NIM/GNPA/CASA data — use ratios only
+        b_score = None
+        f_score = round(r_score, 2)
 
     total = round(t_score * tech_w + f_score * fund_w + s_score * sent_w, 2)
 
@@ -114,7 +120,7 @@ def score_stock(symbol: str, signal_time: Optional[datetime] = None) -> dict:
         "total_score":         total,
         "technical_score":     round(t_score, 2),
         "fundamental_score":   round(f_score, 2),
-        "banking_kpi_score":   round(b_score, 2),
+        "banking_kpi_score":   round(b_score, 2) if b_score is not None else None,
         "ratios_score":        round(r_score, 2),
         "sentiment_score":     round(s_score, 2),
         "weights": {
@@ -130,13 +136,13 @@ def score_stock(symbol: str, signal_time: Optional[datetime] = None) -> dict:
 
 def score_all(signal_time: Optional[datetime] = None) -> list[dict]:
     """
-    Score all 7 banking stocks and return sorted by total_score descending.
+    Score all watchlist stocks and return sorted by total_score descending.
     Prints a formatted table to stdout.
     """
     signal_time = signal_time or datetime.now()
     results = []
 
-    for symbol in BANKING_STOCKS:
+    for symbol in ALL_STOCKS:
         try:
             results.append(score_stock(symbol, signal_time))
         except Exception as exc:
